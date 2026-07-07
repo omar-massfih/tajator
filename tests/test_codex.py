@@ -3,12 +3,30 @@ import stat
 
 import pytest
 
-from tajator.llm.codex import CodexDecider, _extract_json
+from tajator.llm.codex import BRIEFING_SCHEMA, CodexDecider, _extract_json
 from tajator.llm.decide import build_llm, decide_entry
+from tajator.models import MorningBriefing
 
 GOOD_JSON = json.dumps(
     {"action": "enter_call", "level_price": 499.0, "stop_price": 498.6,
      "confidence": "high", "reasoning": "fast drop into prev-day low"}
+)
+
+BRIEFING_JSON = json.dumps(
+    {
+        "symbol": "SPY",
+        "bias": "bullish",
+        "watch_levels": [
+            {
+                "level": {"price": 497.0, "kind": "support", "label": "prev_day_low"},
+                "tradable": True,
+                "direction": "call",
+                "note": "1.20 away, clean bounce level",
+            }
+        ],
+        "cleanest_level": 497.0,
+        "summary": "SPY holding above prev-day low, watching for a call bounce.",
+    }
 )
 
 
@@ -65,3 +83,21 @@ def test_build_llm_routes_codex_strings():
     assert isinstance(build_llm("codex"), CodexDecider)
     decider = build_llm("codex:gpt-5.3-codex")
     assert isinstance(decider, CodexDecider) and decider.model == "gpt-5.3-codex"
+
+
+def test_codex_decider_parses_morning_briefing(tmp_path):
+    decider = CodexDecider(
+        binary=fake_codex(tmp_path, answer=BRIEFING_JSON),
+        output_model=MorningBriefing,
+        schema=BRIEFING_SCHEMA,
+    )
+    briefing = decider.invoke(MESSAGES)
+    assert isinstance(briefing, MorningBriefing)
+    assert briefing.bias == "bullish"
+    assert briefing.watch_levels[0].tradable is True
+
+
+def test_build_llm_routes_codex_briefing_output_model():
+    decider = build_llm("codex", output_model=MorningBriefing)
+    assert isinstance(decider, CodexDecider)
+    assert decider.output_model is MorningBriefing

@@ -27,6 +27,25 @@ class Level(BaseModel):
     label: str  # e.g. "prev_day_low", "premarket_high", "double_top", "swing_low"
 
 
+class LevelWatch(BaseModel):
+    """One level as judged during pre-market prep."""
+
+    level: Level
+    tradable: bool
+    direction: Direction | None = None
+    note: str = ""
+
+
+class MorningBriefing(BaseModel):
+    """Structured output of the pre-market prep LLM call. Planning only — no trade results from it."""
+
+    symbol: str
+    bias: Literal["bullish", "bearish", "neutral"]
+    watch_levels: list[LevelWatch]
+    cleanest_level: float | None = None
+    summary: str = Field(description="1-3 sentence overall read for the morning, journaled verbatim")
+
+
 class SetupCandidate(BaseModel):
     """Mechanically detected 'price approaching a level with speed' candidate."""
 

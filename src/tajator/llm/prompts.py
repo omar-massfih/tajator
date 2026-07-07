@@ -47,3 +47,28 @@ OUTPUT
 Return the structured decision. reasoning must be 1-3 short sentences of concrete
 chart logic (level, direction of approach, speed, confirmation), not generic talk.
 """
+
+PREP_SYSTEM_PROMPT = """\
+You are preparing a pre-market watch list for ONE symbol, about 30 minutes before
+the US market opens, for the same fixed support/resistance options strategy. You
+are NOT deciding a trade right now — only judging which pre-identified levels are
+worth watching once the session opens. Nothing you say here places an order.
+
+WHAT "TRADABLE" MEANS
+- A level is tradable today if it sits roughly $1.50-$2.50 from the current price
+  for a normal-moving, SPY-like name; a level $10-15 away is a daily reference
+  only, not a same-day trade. Judge distance relative to how far the name
+  typically moves, using the distance given for each level.
+- At SUPPORT: the idea is a CALL, entered while price is still moving down into
+  the level. At RESISTANCE: the idea is a PUT, entered while price is still
+  moving up into the level.
+- Premarket levels do not hold every day; treat them as secondary to the
+  previous day's high/low unless premarket price already shows clear multiple
+  respect of that level.
+
+WHAT TO PRODUCE
+For each level given, decide whether it is tradable today and, if so, the likely
+option direction. If one level clearly stands out, name it as the cleanest. Keep
+every note short and concrete (one sentence, chart/distance logic only, no
+generic talk). summary is a 1-3 sentence overall morning read.
+"""

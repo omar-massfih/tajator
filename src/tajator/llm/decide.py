@@ -9,9 +9,19 @@ from __future__ import annotations
 import logging
 
 from langchain.chat_models import init_chat_model
+from pydantic import BaseModel
 
-from ..models import Bar, Decision, Level, OpenPosition, SetupCandidate, Snapshot
-from .prompts import SYSTEM_PROMPT
+from ..models import (
+    Bar,
+    Decision,
+    Level,
+    LevelWatch,
+    MorningBriefing,
+    OpenPosition,
+    SetupCandidate,
+    Snapshot,
+)
+from .prompts import PREP_SYSTEM_PROMPT, SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -19,16 +29,17 @@ LLM_TIMEOUT_S = 20
 RECENT_BARS = 10
 
 
-def build_llm(model_string: str):
+def build_llm(model_string: str, output_model: type[BaseModel] = Decision):
     """`model_string` is an init_chat_model id like 'openai:gpt-5.1', or
     'codex' / 'codex:<model>' to use the Codex CLI (ChatGPT subscription)."""
     if model_string == "codex" or model_string.startswith("codex:"):
-        from .codex import CodexDecider
+        from .codex import BRIEFING_SCHEMA, DECISION_SCHEMA, CodexDecider
 
         _, _, model = model_string.partition(":")
-        return CodexDecider(model=model or None)
+        schema = BRIEFING_SCHEMA if output_model is MorningBriefing else DECISION_SCHEMA
+        return CodexDecider(model=model or None, output_model=output_model, schema=schema)
     llm = init_chat_model(model_string, timeout=LLM_TIMEOUT_S)
-    return llm.with_structured_output(Decision)
+    return llm.with_structured_output(output_model)
 
 
 def format_snapshot(
@@ -104,3 +115,35 @@ def decide_scale(llm, user_text: str) -> Decision:
     except Exception as exc:  # noqa: BLE001
         log.warning("LLM scale decision failed (%s) — scaling one piece", exc)
         return Decision(action="scale_out", reasoning=f"LLM error, scaling by default: {exc}")
+
+
+def format_prep_snapshot(symbol: str, snapshot: Snapshot, levels: list[Level]) -> str:
+    lines = [
+        f"{symbol} pre-market prep @ {snapshot.ts:%H:%M} ET — price {snapshot.price:.2f}",
+        "",
+        "levels (price, kind, label, distance from current price):",
+    ]
+    for l in levels:
+        distance = l.price - snapshot.price
+        lines.append(f"  {l.price:.2f}  {l.kind:<10} ({l.label})  distance {distance:+.2f}")
+    return "\n".join(lines)
+
+
+def no_llm_briefing(symbol: str, levels: list[Level], reason: str) -> MorningBriefing:
+    """Deterministic fallback: raw levels only, no judgment invented for the LLM."""
+    return MorningBriefing(
+        symbol=symbol,
+        bias="neutral",
+        watch_levels=[LevelWatch(level=l, tradable=False, note=reason) for l in levels],
+        summary=reason,
+    )
+
+
+def decide_prep(llm, symbol: str, levels: list[Level], user_text: str) -> MorningBriefing:
+    try:
+        return llm.invoke(
+            [{"role": "system", "content": PREP_SYSTEM_PROMPT}, {"role": "user", "content": user_text}]
+        )
+    except Exception as exc:  # noqa: BLE001 — any LLM failure must not stop prep
+        log.warning("LLM prep briefing failed (%s) — deterministic levels only", exc)
+        return no_llm_briefing(symbol, levels, f"LLM unavailable ({exc}); deterministic levels only")

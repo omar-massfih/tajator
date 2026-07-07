@@ -11,12 +11,16 @@ from .broker.stub import StubBroker
 from .graph.build import build_graph
 from .graph.nodes import RuntimeContext
 from .graph.state import AgentState
+from .llm.decide import decide_prep, format_prep_snapshot, no_llm_briefing
+from .market.indicators import build_snapshot
+from .market.levels import detect_levels
 from .models import OpenPosition
 from .trade.execution import execute_exit
 
 ET = ZoneInfo("America/New_York")
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
+PREP_TIME = time(9, 0)  # 30 min before RTH_OPEN
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +28,21 @@ log = logging.getLogger(__name__)
 def _sleep_to_next_minute() -> None:
     now = time_mod.time()
     time_mod.sleep(60 - (now % 60) + 2)  # +2s so the just-closed bar is available
+
+
+def _sleep_until(target: datetime) -> None:
+    while True:
+        remaining = (target - datetime.now(ET)).total_seconds()
+        if remaining <= 0:
+            return
+        time_mod.sleep(min(remaining, 60))
+
+
+def _todays_prep_and_open(now: datetime) -> tuple[datetime, datetime]:
+    day = now.astimezone(ET).date()
+    prep_at = datetime.combine(day, PREP_TIME, tzinfo=ET)
+    open_at = datetime.combine(day, RTH_OPEN, tzinfo=ET)
+    return prep_at, open_at
 
 
 class TradingSession:
@@ -68,6 +87,34 @@ class TradingSession:
             pieces.append(f"position {p.qty_remaining}x {p.contract.local_name}")
         status = " | ".join(pieces) if pieces else "flat, nothing setting up"
         print(f"[{snap.ts:%H:%M}] {snap.symbol} {snap.price:.2f}  {status}")
+
+    def prep(self) -> None:
+        """One-shot pre-market prep: compute levels and (if enabled) an LLM briefing."""
+        ctx = self.ctx
+        bars = ctx.broker.get_bars(ctx.symbol)
+        if not bars:
+            log.warning("prep: no bars yet for %s — skipping", ctx.symbol)
+            return
+        prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
+        levels = detect_levels(bars, prev_high, prev_low)
+        snapshot = build_snapshot(ctx.symbol, bars)
+        if ctx.use_llm:
+            text = format_prep_snapshot(ctx.symbol, snapshot, levels)
+            briefing = decide_prep(ctx.prep_llm, ctx.symbol, levels, text)
+        else:
+            briefing = no_llm_briefing(ctx.symbol, levels, "prep run with --no-llm")
+        ctx.journal.write(
+            "pre_market_prep", ts=snapshot.ts, symbol=ctx.symbol, levels=levels, briefing=briefing
+        )
+        self._print_prep(snapshot, briefing)
+
+    def _print_prep(self, snapshot, briefing) -> None:
+        print(f"\n=== {snapshot.symbol} pre-market prep @ {snapshot.ts:%H:%M} ET — price {snapshot.price:.2f} ===")
+        for w in briefing.watch_levels:
+            tag = "TRADABLE" if w.tradable else "reference"
+            direction = f" {w.direction}" if w.direction else ""
+            print(f"  {w.level.price:.2f}  {w.level.kind:<10} ({w.level.label})  [{tag}{direction}] {w.note}")
+        print(f"  bias: {briefing.bias}  |  {briefing.summary}")
 
     def _on_interrupt(self) -> None:
         if self.position is None:
@@ -137,6 +184,15 @@ class LiveRunner:
         if mode == "LIVE":
             banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
         print(banner)
+        now = datetime.now(ET)
+        prep_at, open_at = _todays_prep_and_open(now)
+        if now < open_at:
+            if now < prep_at:
+                print(f"waiting for pre-market prep at {prep_at:%H:%M} ET ...")
+                _sleep_until(prep_at)
+            print("=== pre-market prep ===")
+            for sess in self.sessions:
+                sess.prep()
         try:
             while True:
                 _sleep_to_next_minute()

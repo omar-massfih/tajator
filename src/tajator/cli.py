@@ -21,6 +21,7 @@ def main() -> None:
 
     sub.add_parser("run", help="live minute loop against IBKR (paper by default)")
     sub.add_parser("check-ib", help="connectivity check: bars, chain, quote — no orders")
+    sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
     replay = sub.add_parser("replay", help="step the graph through a recorded day (no IB orders)")
     src = replay.add_mutually_exclusive_group(required=True)
@@ -38,6 +39,8 @@ def main() -> None:
         cmd_run()
     elif args.command == "check-ib":
         cmd_check_ib()
+    elif args.command == "prep":
+        cmd_prep()
     else:
         cmd_replay(args)
 
@@ -60,18 +63,24 @@ def _ib_broker():
 def cmd_run() -> None:
     from .graph.nodes import RuntimeContext
     from .llm.decide import build_llm
+    from .models import MorningBriefing
     from .runner import LiveRunner, TradingSession
 
     settings, broker = _ib_broker()
     try:
-        llm = build_llm(settings.llm_model)  # fail fast on a missing/invalid API key instead of waiting all day
+        # fail fast on a missing/invalid API key instead of waiting all day
+        llm = build_llm(settings.llm_model)
+        prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
     except Exception as exc:  # noqa: BLE001
         broker.disconnect()
         sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
     journal = Journal(settings.log_dir)
     sessions = [
         TradingSession(
-            RuntimeContext(settings=settings, broker=broker, journal=journal, symbol=symbol, _llm=llm)
+            RuntimeContext(
+                settings=settings, broker=broker, journal=journal, symbol=symbol,
+                _llm=llm, _prep_llm=prep_llm,
+            )
         )
         for symbol in settings.symbols
     ]
@@ -109,6 +118,32 @@ def cmd_check_ib() -> None:
                     premium = broker.get_option_premium(contract)
                     print(f"nearest-strike call: {contract.local_name} — premium {premium}")
         print("\ncheck-ib complete. No orders were placed.")
+    finally:
+        broker.disconnect()
+
+
+def cmd_prep() -> None:
+    from .graph.nodes import RuntimeContext
+    from .llm.decide import build_llm
+    from .models import MorningBriefing
+    from .runner import TradingSession
+
+    settings, broker = _ib_broker()
+    try:
+        llm = build_llm(settings.llm_model)
+        prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
+    except Exception as exc:  # noqa: BLE001
+        broker.disconnect()
+        sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
+    journal = Journal(settings.log_dir)
+    try:
+        for symbol in settings.symbols:
+            ctx = RuntimeContext(
+                settings=settings, broker=broker, journal=journal, symbol=symbol,
+                _llm=llm, _prep_llm=prep_llm,
+            )
+            TradingSession(ctx).prep()
+        print("\nprep complete. No orders were placed.")
     finally:
         broker.disconnect()
 

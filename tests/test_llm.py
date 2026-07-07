@@ -1,6 +1,6 @@
-from tajator.llm.decide import decide_entry, decide_scale, format_snapshot
+from tajator.llm.decide import decide_entry, decide_prep, decide_scale, format_prep_snapshot, format_snapshot
 from tajator.market.indicators import build_snapshot
-from tajator.models import Decision, Level, SetupCandidate
+from tajator.models import Decision, Level, MorningBriefing, SetupCandidate
 
 from conftest import ts, walk
 
@@ -56,3 +56,34 @@ def test_entry_passes_through_valid_decision():
     assert d == good
     system_msg = fake.calls[0][0]
     assert "NEVER chase" in system_msg["content"]
+
+
+def test_format_prep_snapshot_contains_distance():
+    bars = walk(ts(9, 0), [500.0, 500.5, 500.2, 499.8])
+    snap = build_snapshot("SPY", bars)
+    level = Level(price=497.0, kind="support", label="prev_day_low")
+    text = format_prep_snapshot("SPY", snap, [level])
+    assert "pre-market prep" in text
+    assert "prev_day_low" in text
+    assert "distance" in text
+
+
+def test_prep_error_falls_back_to_deterministic_levels():
+    level = Level(price=497.0, kind="support", label="prev_day_low")
+    briefing = decide_prep(FakeLLM(error=TimeoutError("llm timeout")), "SPY", [level], "snapshot")
+    assert isinstance(briefing, MorningBriefing)
+    assert briefing.bias == "neutral"
+    assert briefing.watch_levels[0].tradable is False
+    assert briefing.watch_levels[0].level == level
+
+
+def test_prep_passes_through_valid_briefing():
+    level = Level(price=497.0, kind="support", label="prev_day_low")
+    good = MorningBriefing(
+        symbol="SPY", bias="bullish",
+        watch_levels=[{"level": level, "tradable": True, "direction": "call", "note": "clean"}],
+        summary="watching prev-day low",
+    )
+    fake = FakeLLM(decision=good)
+    briefing = decide_prep(fake, "SPY", [level], "snapshot")
+    assert briefing == good

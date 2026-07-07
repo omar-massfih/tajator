@@ -17,7 +17,7 @@ from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
 from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
-from ..models import Decision
+from ..models import Decision, MorningBriefing
 from ..risk import guardrails
 from ..trade import position as pos
 from ..trade.execution import execute_entry, execute_exit, execute_scale_out
@@ -32,12 +32,19 @@ class RuntimeContext:
     symbol: str
     use_llm: bool = True
     _llm: Any = field(default=None, repr=False)
+    _prep_llm: Any = field(default=None, repr=False)
 
     @property
     def llm(self) -> Any:
         if self._llm is None:
             self._llm = build_llm(self.settings.llm_model)
         return self._llm
+
+    @property
+    def prep_llm(self) -> Any:
+        if self._prep_llm is None:
+            self._prep_llm = build_llm(self.settings.llm_model, output_model=MorningBriefing)
+        return self._prep_llm
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:

@@ -20,13 +20,15 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from ..models import Decision
 
 log = logging.getLogger(__name__)
 
 CODEX_TIMEOUT_S = 45  # ticks are 60s; a late answer is dropped, not queued
 
-# Hand-written strict schema (OpenAI structured-output style): every field
+# Hand-written strict schemas (OpenAI structured-output style): every field
 # required, no extras, optionals expressed as nullable.
 DECISION_SCHEMA = {
     "type": "object",
@@ -44,18 +46,62 @@ DECISION_SCHEMA = {
     "additionalProperties": False,
 }
 
+_LEVEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "price": {"type": "number"},
+        "kind": {"type": "string", "enum": ["support", "resistance"]},
+        "label": {"type": "string"},
+    },
+    "required": ["price", "kind", "label"],
+    "additionalProperties": False,
+}
+
+BRIEFING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symbol": {"type": "string"},
+        "bias": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+        "watch_levels": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "level": _LEVEL_SCHEMA,
+                    "tradable": {"type": "boolean"},
+                    "direction": {"type": ["string", "null"], "enum": ["call", "put", None]},
+                    "note": {"type": "string"},
+                },
+                "required": ["level", "tradable", "direction", "note"],
+                "additionalProperties": False,
+            },
+        },
+        "cleanest_level": {"type": ["number", "null"]},
+        "summary": {"type": "string"},
+    },
+    "required": ["symbol", "bias", "watch_levels", "cleanest_level", "summary"],
+    "additionalProperties": False,
+}
+
 
 class CodexDecider:
-    """Drop-in for the langchain structured-output chain: .invoke(messages) -> Decision."""
+    """Drop-in for the langchain structured-output chain: .invoke(messages) -> output_model."""
 
-    def __init__(self, model: str | None = None, binary: str = "codex",
-                 timeout_s: int = CODEX_TIMEOUT_S):
+    def __init__(
+        self,
+        model: str | None = None,
+        binary: str = "codex",
+        timeout_s: int = CODEX_TIMEOUT_S,
+        output_model: type[BaseModel] = Decision,
+        schema: dict = DECISION_SCHEMA,
+    ):
         self.model = model
         self.binary = binary
         self.timeout_s = timeout_s
+        self.output_model = output_model
         self._workdir = Path(tempfile.mkdtemp(prefix="tajator-codex-"))
         self._schema_file = self._workdir / "decision.schema.json"
-        self._schema_file.write_text(json.dumps(DECISION_SCHEMA))
+        self._schema_file.write_text(json.dumps(schema))
 
     def invoke(self, messages: list[dict]) -> Decision:
         prompt = "\n\n".join(m["content"] for m in messages)
@@ -86,7 +132,7 @@ class CodexDecider:
         raw = answer_file.read_text().strip() if answer_file.exists() else ""
         if not raw:
             raw = result.stdout
-        return Decision.model_validate(_extract_json(raw))
+        return self.output_model.model_validate(_extract_json(raw))
 
 
 def _extract_json(text: str) -> dict:
