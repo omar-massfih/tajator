@@ -39,19 +39,24 @@ fetch_data → compute_context ─┬─ (position open) → manage_position →
 Requires [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed automatically):
 
 ```bash
-cd agent
 uv sync
 cp .env.example .env   # then fill it in
 ```
 
-**API key note:** a ChatGPT/Codex subscription is *not* an API key. You need a
-pay-as-you-go key from platform.openai.com in `OPENAI_API_KEY` — or set
-`LLM_MODEL` to another provider (e.g. `anthropic:claude-sonnet-5`) plus that
-provider's key env var.
+**LLM backend** (`LLM_MODEL` in `.env`):
 
-**IBKR:** install TWS or IB Gateway, log into your **paper** account, and enable
-the API (Configure → API → Settings → *Enable ActiveX and Socket Clients*;
-port 7497 for TWS paper, 4002 for Gateway paper). Without a market-data
+- `codex` (default) — uses the [Codex CLI](https://github.com/openai/codex) with your
+  ChatGPT subscription: `brew install codex` and `codex login` once, no API key needed.
+  Each decision runs `codex exec` in a read-only sandbox from an empty scratch dir,
+  with the `Decision` JSON schema enforced via `--output-schema`. Optionally pin a
+  model with `codex:<model>`.
+- `openai:gpt-5.1` (or any langchain `init_chat_model` string, e.g.
+  `anthropic:claude-sonnet-5`) — direct API access; needs that provider's key
+  (`OPENAI_API_KEY`, etc.). Note a ChatGPT subscription is *not* an OpenAI API key.
+
+**IBKR:** install [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php),
+log into your **paper** account, and enable the API (Configure → API → Settings →
+*Enable ActiveX and Socket Clients*; port 4002 for paper). Without a market-data
 subscription the agent falls back to delayed data (fine for plumbing tests,
 not for live timing).
 
@@ -72,9 +77,9 @@ fills — it validates plumbing and decision flow, **it is not a backtest**.
 ## Safety
 
 - Paper by default. Going live requires changing **both** `TRADING_MODE=live` and
-  `IB_PORT` to a live port — one without the other refuses to start.
-- Kill switch: `touch agent/KILL` blocks all new entries immediately (existing
-  positions are still managed and can exit).
+  `IB_PORT=4001` — one without the other refuses to start.
+- Kill switch: `touch KILL` in the repo root blocks all new entries immediately
+  (existing positions are still managed and can exit).
 - Ctrl-C during `run` offers to flatten any open position.
 - Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`: snapshots, candidates,
   every LLM decision + reasoning, risk vetoes, and fills.

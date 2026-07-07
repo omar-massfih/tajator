@@ -20,7 +20,13 @@ RECENT_BARS = 10
 
 
 def build_llm(model_string: str):
-    """`model_string` is an init_chat_model id like 'openai:gpt-5.1'."""
+    """`model_string` is an init_chat_model id like 'openai:gpt-5.1', or
+    'codex' / 'codex:<model>' to use the Codex CLI (ChatGPT subscription)."""
+    if model_string == "codex" or model_string.startswith("codex:"):
+        from .codex import CodexDecider
+
+        _, _, model = model_string.partition(":")
+        return CodexDecider(model=model or None)
     llm = init_chat_model(model_string, timeout=LLM_TIMEOUT_S)
     return llm.with_structured_output(Decision)
 

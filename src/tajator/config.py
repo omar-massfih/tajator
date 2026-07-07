@@ -10,7 +10,7 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
-LIVE_PORTS = {7496, 4001}
+LIVE_PORTS = {4001}  # IB Gateway live; 4002 = IB Gateway paper
 
 
 class Settings(BaseSettings):
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Interactive Brokers
     ib_host: str = "127.0.0.1"
-    ib_port: int = 7497
+    ib_port: int = 4002
     ib_client_id: int = 17
     trading_mode: Literal["paper", "live"] = "paper"
     market_data_type: int = 1
@@ -53,11 +53,11 @@ class Settings(BaseSettings):
         if self.trading_mode == "live" and self.ib_port not in LIVE_PORTS:
             raise ValueError(
                 "TRADING_MODE=live but IB_PORT is a paper port. "
-                "Set IB_PORT to 7496 (TWS) or 4001 (Gateway) to confirm live trading."
+                "Set IB_PORT=4001 (IB Gateway live) to confirm live trading."
             )
         if self.trading_mode == "paper" and self.ib_port in LIVE_PORTS:
             raise ValueError(
-                "TRADING_MODE=paper but IB_PORT is a LIVE port. Use 7497 (TWS) or 4002 (Gateway)."
+                "TRADING_MODE=paper but IB_PORT is a LIVE port. Use 4002 (IB Gateway paper)."
             )
         return self
 

@@ -51,7 +51,7 @@ def _ib_broker():
     except Exception as exc:  # noqa: BLE001
         sys.exit(
             f"could not connect to IB at {settings.ib_host}:{settings.ib_port} ({exc}).\n"
-            "Is TWS or IB Gateway running with the API enabled?"
+            "Is IB Gateway running with the API enabled?"
         )
     return settings, broker
 

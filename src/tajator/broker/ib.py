@@ -1,8 +1,8 @@
 """Interactive Brokers via ib_async (maintained fork of ib_insync).
 
-Requires TWS or IB Gateway running with the API enabled
+Requires IB Gateway running with the API enabled
 (Configure → API → Settings → Enable ActiveX and Socket Clients).
-Port 7497 = TWS paper, 4002 = Gateway paper.
+Port 4002 = IB Gateway paper, 4001 = IB Gateway live.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ class IBBroker(Broker):
         if not trade.isDone():
             raise RuntimeError(
                 f"{side} {qty}x {contract.local_name} not filled within {ORDER_TIMEOUT_S}s "
-                f"(status={trade.orderStatus.status}) — check TWS"
+                f"(status={trade.orderStatus.status}) — check IB Gateway"
             )
         if trade.orderStatus.status != "Filled":
             raise RuntimeError(

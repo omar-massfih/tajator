@@ -90,7 +90,7 @@ class TradingSession:
             self.position = None
             print(f"flattened {action.qty}x @ {action.premium:.2f}")
         else:
-            print("position left open — manage it in TWS.")
+            print("position left open — close it manually via IBKR.")
 
     # -- replay ------------------------------------------------------------------
 
