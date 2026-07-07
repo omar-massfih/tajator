@@ -1,0 +1,176 @@
+"""Graph nodes. Each is a closure over the RuntimeContext (broker, LLM, journal, settings).
+
+The LLM appears in exactly two nodes (llm_decide, llm_manage); everything
+else is deterministic. With use_llm=False a rule-follower stands in for the
+LLM — used by `replay --no-llm` and tests.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..broker.base import Broker
+from ..config import Settings
+from ..journal import Journal
+from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
+from ..market.indicators import build_snapshot
+from ..market.levels import detect_levels
+from ..market.setups import detect_candidates
+from ..models import Decision
+from ..risk import guardrails
+from ..trade import position as pos
+from ..trade.execution import execute_entry, execute_exit, execute_scale_out
+from .state import AgentState
+
+
+@dataclass
+class RuntimeContext:
+    settings: Settings
+    broker: Broker
+    journal: Journal
+    use_llm: bool = True
+    _llm: Any = field(default=None, repr=False)
+
+    @property
+    def llm(self) -> Any:
+        if self._llm is None:
+            self._llm = build_llm(self.settings.llm_model)
+        return self._llm
+
+
+def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
+    settings = ctx.settings
+
+    def fetch_data(state: AgentState) -> dict:
+        bars = ctx.broker.get_bars(settings.symbol)
+        prev_high, prev_low = ctx.broker.get_prev_day_range(settings.symbol)
+        return {"bars": bars, "prev_day_high": prev_high, "prev_day_low": prev_low}
+
+    def compute_context(state: AgentState) -> dict:
+        bars = state["bars"]
+        snapshot = build_snapshot(settings.symbol, bars)
+        levels = detect_levels(bars, state.get("prev_day_high"), state.get("prev_day_low"))
+        return {"snapshot": snapshot, "levels": levels}
+
+    # ----- position-open branch ---------------------------------------------
+
+    def manage_position(state: AgentState) -> dict:
+        position, snapshot = state["position"], state["snapshot"]
+        pos.update_extreme(position, snapshot.price)
+        action = pos.evaluate(position, snapshot)
+        if action.kind != "hold":
+            ctx.journal.write("manage_signal", ts=snapshot.ts, action=action)
+        return {"manage_action": action}
+
+    def llm_manage(state: AgentState) -> dict:
+        snapshot, action = state["snapshot"], state["manage_action"]
+        if not ctx.use_llm:
+            decision = Decision(action="scale_out", reasoning=f"rule-follower: {action.reason}")
+        else:
+            text = format_snapshot(
+                state["bars"], snapshot, state["levels"], [],
+                state.get("trades_today", 0), position=state["position"],
+                manage_note=f"{action.reason}. Scale out this piece now, or hold one more bar?",
+            )
+            try:
+                decision = decide_scale(ctx.llm, text)
+            except Exception as exc:  # noqa: BLE001 — e.g. missing API key at LLM construction
+                decision = Decision(action="scale_out", reasoning=f"LLM unavailable ({exc}); scaling by default")
+        ctx.journal.write("llm_decision", ts=snapshot.ts, mode="manage", decision=decision)
+        return {"decision": decision}
+
+    def do_scale_out(state: AgentState) -> dict:
+        position, snapshot = state["position"], state["snapshot"]
+        reason = state["manage_action"].reason
+        action = execute_scale_out(ctx.broker, position, snapshot, reason)
+        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        closed = position.qty_remaining == 0
+        return {"actions": [action], "position": None if closed else position}
+
+    def do_exit(state: AgentState) -> dict:
+        position, snapshot = state["position"], state["snapshot"]
+        manage = state.get("manage_action")
+        if manage is not None and manage.kind in ("stop_exit", "runner_exit"):
+            kind, reason = manage.kind, manage.reason
+        else:
+            kind, reason = "manual_exit", state["decision"].reasoning
+        action = execute_exit(ctx.broker, position, snapshot, kind, reason)
+        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        return {"actions": [action], "position": None}
+
+    # ----- flat branch --------------------------------------------------------
+
+    def detect_setups(state: AgentState) -> dict:
+        candidates = detect_candidates(state["bars"], state["levels"], state["snapshot"])
+        if candidates:
+            ctx.journal.write(
+                "candidates", ts=state["snapshot"].ts,
+                candidates=candidates, snapshot=state["snapshot"],
+            )
+        return {"candidates": candidates}
+
+    def llm_decide(state: AgentState) -> dict:
+        snapshot, candidates = state["snapshot"], state["candidates"]
+        if not ctx.use_llm:
+            c = candidates[0]
+            buffer = settings.stop_buffer_cents / 100
+            stop = c.level.price - buffer if c.direction == "call" else c.level.price + buffer
+            decision = Decision(
+                action=f"enter_{c.direction}", level_price=c.level.price, stop_price=round(stop, 2),
+                confidence="medium", reasoning=f"rule-follower: {c.note}",
+            )
+        else:
+            text = format_snapshot(
+                state["bars"], snapshot, state["levels"], candidates,
+                state.get("trades_today", 0),
+            )
+            try:
+                decision = decide_entry(ctx.llm, text)
+            except Exception as exc:  # noqa: BLE001 — e.g. missing API key at LLM construction
+                decision = Decision(action="wait", reasoning=f"LLM unavailable ({exc}); waiting")
+        ctx.journal.write("llm_decision", ts=snapshot.ts, mode="entry", decision=decision)
+        return {"decision": decision}
+
+    def risk_gate(state: AgentState) -> dict:
+        verdict = guardrails.check(
+            state["decision"],
+            now=ctx.broker.now(),
+            position=state.get("position"),
+            trades_today=state.get("trades_today", 0),
+            candidates=state["candidates"],
+            settings=settings,
+        )
+        if not verdict.approved:
+            ctx.journal.write(
+                "risk_veto", ts=state["snapshot"].ts,
+                decision=state["decision"], violations=verdict.violations,
+            )
+        return {"risk": verdict}
+
+    def do_entry(state: AgentState) -> dict:
+        decision, snapshot = state["decision"], state["snapshot"]
+        direction = "call" if decision.action == "enter_call" else "put"
+        position, action, skip = execute_entry(ctx.broker, settings, decision, direction, snapshot)
+        if skip is not None:
+            ctx.journal.write("entry_skipped", ts=snapshot.ts, reason=skip, decision=decision)
+            return {"skip_reason": skip}
+        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        return {
+            "actions": [action],
+            "position": position,
+            "trades_today": state.get("trades_today", 0) + 1,
+        }
+
+    return {
+        "fetch_data": fetch_data,
+        "compute_context": compute_context,
+        "manage_position": manage_position,
+        "llm_manage": llm_manage,
+        "do_scale_out": do_scale_out,
+        "do_exit": do_exit,
+        "detect_setups": detect_setups,
+        "llm_decide": llm_decide,
+        "risk_gate": risk_gate,
+        "do_entry": do_entry,
+    }
