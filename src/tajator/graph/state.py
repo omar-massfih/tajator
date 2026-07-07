@@ -32,6 +32,7 @@ class AgentState(TypedDict, total=False):
     snapshot: Snapshot
     levels: list[Level]
     candidates: list[SetupCandidate]
+    entry_blockers: list[str]
     manage_action: ManageAction
     decision: Decision
     risk: RiskVerdict

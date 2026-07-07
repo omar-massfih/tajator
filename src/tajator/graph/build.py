@@ -36,7 +36,9 @@ def route_manage_decision(state: AgentState) -> str:
 
 
 def route_setups(state: AgentState) -> str:
-    return "llm_decide" if state.get("candidates") else END
+    if not state.get("candidates") or state.get("entry_blockers"):
+        return END
+    return "llm_decide"
 
 
 def route_decision(state: AgentState) -> str:

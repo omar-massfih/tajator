@@ -86,7 +86,7 @@ class Decision(BaseModel):
 
 class RiskVerdict(BaseModel):
     approved: bool
-    violations: list[str] = []
+    violations: list[str] = Field(default_factory=list)
 
 
 class SelectedContract(BaseModel):

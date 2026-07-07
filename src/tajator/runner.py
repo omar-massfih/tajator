@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time as time_mod
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from .broker.stub import StubBroker
@@ -45,12 +45,26 @@ def _todays_prep_and_open(now: datetime) -> tuple[datetime, datetime]:
     return prep_at, open_at
 
 
+def _next_session_prep(now: datetime) -> datetime:
+    """Prep time of the next weekday session strictly after `now`."""
+    day = now.astimezone(ET).date()
+    prep_at = datetime.combine(day, PREP_TIME, tzinfo=ET)
+    while prep_at <= now or prep_at.weekday() >= 5:
+        day += timedelta(days=1)
+        prep_at = datetime.combine(day, PREP_TIME, tzinfo=ET)
+    return prep_at
+
+
 class TradingSession:
     def __init__(self, ctx: RuntimeContext):
         self.ctx = ctx
         self.graph = build_graph(ctx)
         self.position: OpenPosition | None = None
         self.trades_today: int = 0
+
+    def start_new_day(self) -> None:
+        """Reset per-day state; an overnight position stays and keeps being managed."""
+        self.trades_today = 0
 
     def tick(self) -> AgentState:
         state: AgentState = {"position": self.position, "trades_today": self.trades_today}
@@ -154,8 +168,28 @@ class TradingSession:
                 self._print_tick(out)
             if not broker.advance():
                 break
+        self._flatten_end_of_replay(broker, verbose)
         if verbose:
             self._replay_summary(broker)
+
+    def _flatten_end_of_replay(self, broker: StubBroker, verbose: bool) -> None:
+        """Force-close a position left at the end of a replayed day.
+
+        Without this, backtest/replay PnL would silently exclude the trade's
+        entire entry cost (the ledger only counts closed round-trips)."""
+        if self.position is None:
+            return
+        bars = broker.get_bars(self.ctx.symbol, lookback_minutes=5)
+        snap = build_snapshot(self.ctx.symbol, bars)
+        action = execute_exit(
+            self.ctx.broker, self.position, snap, "manual_exit", "end of replay day — forced flat"
+        )
+        self.ctx.journal.write(
+            "fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=self.position
+        )
+        self.position = None
+        if verbose:
+            print(f"end of day — flattened {action.qty}x @ {action.premium:.2f}")
 
     def _replay_summary(self, broker: StubBroker) -> None:
         print("\n--- replay summary ---")
@@ -186,8 +220,25 @@ class LiveRunner:
         if mode == "LIVE":
             banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
         print(banner)
+        try:
+            while True:
+                self._run_one_day()
+        except KeyboardInterrupt:
+            for sess in self.sessions:
+                sess._on_interrupt()
+
+    def _run_one_day(self) -> None:
+        """Wait for the next session if closed; otherwise prep, tick until the close."""
         now = datetime.now(ET)
         prep_at, open_at = _todays_prep_and_open(now)
+        close_at = datetime.combine(now.date(), RTH_CLOSE, tzinfo=ET)
+        if now.weekday() >= 5 or now >= close_at:
+            next_prep = _next_session_prep(now)
+            print(f"market closed — sleeping until prep {next_prep:%a %Y-%m-%d %H:%M} ET")
+            _sleep_until(next_prep)
+            return  # re-derive the new day's times on the next pass
+        for sess in self.sessions:
+            sess.start_new_day()
         if now < open_at:
             if now < prep_at:
                 print(f"waiting for pre-market prep at {prep_at:%H:%M} ET ...")
@@ -195,11 +246,25 @@ class LiveRunner:
             print("=== pre-market prep ===")
             for sess in self.sessions:
                 sess.prep()
-        try:
-            while True:
-                _sleep_to_next_minute()
-                for sess in self.sessions:
-                    sess._tick_once()
-        except KeyboardInterrupt:
+        while datetime.now(ET) < close_at:
+            _sleep_to_next_minute()
             for sess in self.sessions:
-                sess._on_interrupt()
+                sess._tick_once()
+        self._on_session_close()
+
+    def _on_session_close(self) -> None:
+        for sess in self.sessions:
+            if sess.position is None:
+                continue
+            p = sess.position
+            log.warning(
+                "%s: session closed with open position %dx %s — it will be managed "
+                "again tomorrow; close it manually via IBKR if that is not intended",
+                sess.ctx.symbol, p.qty_remaining, p.contract.local_name,
+            )
+            print(
+                f"!!! {sess.ctx.symbol}: market closed with open position "
+                f"{p.qty_remaining}x {p.contract.local_name} — close manually via IBKR "
+                "or leave it to be managed tomorrow"
+            )
+            sess.ctx.journal.write("eod_open_position", symbol=sess.ctx.symbol, position=p)

@@ -99,7 +99,8 @@ class CodexDecider:
         self.binary = binary
         self.timeout_s = timeout_s
         self.output_model = output_model
-        self._workdir = Path(tempfile.mkdtemp(prefix="tajator-codex-"))
+        self._tmp = tempfile.TemporaryDirectory(prefix="tajator-codex-")  # cleaned on GC/exit
+        self._workdir = Path(self._tmp.name)
         self._schema_file = self._workdir / "decision.schema.json"
         self._schema_file.write_text(json.dumps(schema))
 

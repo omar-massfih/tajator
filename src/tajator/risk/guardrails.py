@@ -19,19 +19,14 @@ STOP_MIN_CENTS = 20
 STOP_MAX_CENTS = 60
 
 
-def check(
-    decision: Decision,
+def entry_blockers(
     *,
     now: datetime,
     position: OpenPosition | None,
     trades_today: int,
-    candidates: list[SetupCandidate],
     settings: Settings,
-    estimated_premium: float | None = None,
-) -> RiskVerdict:
-    if decision.action in ("wait", "scale_out", "exit"):
-        return RiskVerdict(approved=True)
-
+) -> list[str]:
+    """Decision-independent entry vetoes — cheap enough to run before the LLM."""
     violations: list[str] = []
     now_et = now.astimezone(ET)
 
@@ -47,6 +42,25 @@ def check(
         violations.append(f"max {settings.max_trades_per_day} trades/day reached")
     if position is not None:
         violations.append("a position is already open — one at a time")
+    return violations
+
+
+def check(
+    decision: Decision,
+    *,
+    now: datetime,
+    position: OpenPosition | None,
+    trades_today: int,
+    candidates: list[SetupCandidate],
+    settings: Settings,
+    estimated_premium: float | None = None,
+) -> RiskVerdict:
+    if decision.action in ("wait", "scale_out", "exit"):
+        return RiskVerdict(approved=True)
+
+    violations = entry_blockers(
+        now=now, position=position, trades_today=trades_today, settings=settings
+    )
 
     direction = "call" if decision.action == "enter_call" else "put"
     matched = _matching_candidate(decision, direction, candidates)

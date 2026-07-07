@@ -12,7 +12,7 @@ from tajator.models import (
     SelectedContract,
     SetupCandidate,
 )
-from tajator.risk.guardrails import check
+from tajator.risk.guardrails import check, entry_blockers
 
 ET = ZoneInfo("America/New_York")
 MIDDAY = datetime(2026, 7, 6, 11, 0, tzinfo=ET)  # Monday 11:00 ET
@@ -110,3 +110,18 @@ def test_missing_stop_vetoes(settings):
 def test_single_contract_over_budget_vetoes(settings):
     assert not run_check(settings, premium=6.0).approved  # $600 > $500
     assert run_check(settings, premium=4.0).approved
+
+
+def test_entry_blockers_clear_midday(settings):
+    assert entry_blockers(now=MIDDAY, position=None, trades_today=0, settings=settings) == []
+
+
+def test_entry_blockers_collects_cheap_vetoes(settings):
+    settings.kill_switch_file.write_text("stop")
+    blockers = entry_blockers(
+        now=MIDDAY.replace(hour=16),  # after the entry window
+        position=open_position(),
+        trades_today=2,
+        settings=settings,
+    )
+    assert len(blockers) == 4  # kill switch, time window, max trades, open position

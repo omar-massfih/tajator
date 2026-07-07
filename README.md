@@ -73,7 +73,10 @@ uv run pytest                     # full test suite
 ```
 
 Replay steps the *same graph* through a recorded day with instant synthetic option
-fills — it validates plumbing and decision flow, it is not a backtest.
+fills — it validates plumbing and decision flow, it is not a backtest. Any position
+still open at the recorded day's close is force-flattened at the last bar so
+replay/backtest ledgers count every trade (live trading never auto-flattens; it
+warns and journals instead).
 
 `backtest` steps the same graph over every trading day in a date range, fetching
 (and caching under `data/historical/`) real underlying bars from IB and, for every
@@ -92,7 +95,8 @@ calendar (holidays are just days with no bars, silently skipped).
 ## Safety
 
 - Paper by default. Going live requires changing **both** `TRADING_MODE=live` and
-  `IB_PORT=4001` — one without the other refuses to start.
+  `IB_PORT` to a live port (4001 for IB Gateway, 7496 for TWS) — one without the
+  other refuses to start; paper mode refuses to connect to any live port.
 - Kill switch: `touch KILL` in the repo root blocks all new entries immediately
   (existing positions are still managed and can exit).
 - Ctrl-C during `run` offers to flatten any open position.
@@ -107,7 +111,10 @@ enforced by the loop), holiday calendar. Market orders only.
 
 Fixed watchlist (`SYMBOLS=SPY,AAPL,MSFT,NVDA`, one comma-separated env var) — each
 symbol runs its own independent `TradingSession` (own position, own daily trade
-counter) sharing one IB connection, journal, and LLM client. `check-ib` checks
+counter) sharing one IB connection, journal, and LLM client. Sessions tick
+sequentially, so with many symbols and a slow LLM one pass can exceed the 60s
+cadence and delay stop checks for later symbols — keep the watchlist short when
+running with the LLM. `check-ib` checks
 connectivity for every configured symbol; `replay` still exercises one symbol per
 run via `--symbol` (defaults to the first configured symbol).
 

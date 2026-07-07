@@ -113,12 +113,26 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
 
     def detect_setups(state: AgentState) -> dict:
         candidates = detect_candidates(state["bars"], state["levels"], state["snapshot"])
-        if candidates:
+        if not candidates:
+            return {"candidates": candidates}
+        ctx.journal.write(
+            "candidates", ts=state["snapshot"].ts, symbol=ctx.symbol,
+            candidates=candidates, snapshot=state["snapshot"],
+        )
+        # Cheap deterministic vetoes (kill switch, time window, trade count)
+        # before paying for an LLM call that risk_gate would reject anyway.
+        blockers = guardrails.entry_blockers(
+            now=ctx.broker.now(),
+            position=state.get("position"),
+            trades_today=state.get("trades_today", 0),
+            settings=settings,
+        )
+        if blockers:
             ctx.journal.write(
-                "candidates", ts=state["snapshot"].ts, symbol=ctx.symbol,
-                candidates=candidates, snapshot=state["snapshot"],
+                "entry_pre_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                candidates=candidates, violations=blockers,
             )
-        return {"candidates": candidates}
+        return {"candidates": candidates, "entry_blockers": blockers}
 
     def llm_decide(state: AgentState) -> dict:
         snapshot, candidates = state["snapshot"], state["candidates"]

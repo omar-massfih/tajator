@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,7 @@ log = logging.getLogger(__name__)
 
 NO_SUBSCRIPTION_CODES = {354, 10167, 10197}
 ORDER_TIMEOUT_S = 30
+CANCEL_TIMEOUT_S = 10
 
 
 class IBBroker(Broker):
@@ -148,6 +150,11 @@ class IBBroker(Broker):
         price = ticker.marketPrice()
         if price is None or math.isnan(price) or price <= 0:
             price = ticker.close
+            if price is not None and not math.isnan(price) and price > 0:
+                log.warning(
+                    "no live quote for %s — using last close %.2f for sizing "
+                    "(may be stale)", contract.local_name, price,
+                )
         if price is None or math.isnan(price) or price <= 0:
             return None
         return float(price)
@@ -161,14 +168,21 @@ class IBBroker(Broker):
     def _place(self, contract: SelectedContract, side: str, qty: int) -> Fill:
         opt = self._option(contract)
         trade = self.ib.placeOrder(opt, MarketOrder(side, qty))
-        waited = 0.0
-        while not trade.isDone() and waited < ORDER_TIMEOUT_S:
+        deadline = time.monotonic() + ORDER_TIMEOUT_S
+        while not trade.isDone() and time.monotonic() < deadline:
             self.ib.waitOnUpdate(timeout=1.0)
-            waited += 1.0
         if not trade.isDone():
+            # Never leave a market order working untracked: cancel, then wait
+            # briefly for the terminal status so partial fills are reported.
+            self.ib.cancelOrder(trade.order)
+            cancel_deadline = time.monotonic() + CANCEL_TIMEOUT_S
+            while not trade.isDone() and time.monotonic() < cancel_deadline:
+                self.ib.waitOnUpdate(timeout=1.0)
+            filled = int(trade.orderStatus.filled or 0)
             raise RuntimeError(
-                f"{side} {qty}x {contract.local_name} not filled within {ORDER_TIMEOUT_S}s "
-                f"(status={trade.orderStatus.status}) — check IB Gateway"
+                f"{side} {qty}x {contract.local_name} not filled within {ORDER_TIMEOUT_S}s — "
+                f"cancelled (status={trade.orderStatus.status}, filled {filled}/{qty}). "
+                "Reconcile the position in IB Gateway before continuing."
             )
         if trade.orderStatus.status != "Filled":
             raise RuntimeError(
