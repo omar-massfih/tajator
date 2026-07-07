@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # Paths
     kill_switch_file: Path = AGENT_DIR / "KILL"
     log_dir: Path = AGENT_DIR / "logs"
+    backtest_cache_dir: Path = AGENT_DIR / "data" / "historical"
 
     @field_validator("no_new_entries_after", mode="before")
     @classmethod

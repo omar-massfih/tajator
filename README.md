@@ -67,12 +67,27 @@ uv run tajator check-ib     # connectivity: bars, chain, quote — places NO ord
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
     --prev-high 503.5 --prev-low 497.0   # bundled synthetic day, no IB/LLM needed
 uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay with the LLM
+uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-llm
 uv run tajator run          # live minute loop (paper) during market hours
 uv run pytest                     # full test suite
 ```
 
 Replay steps the *same graph* through a recorded day with instant synthetic option
-fills — it validates plumbing and decision flow, **it is not a backtest**.
+fills — it validates plumbing and decision flow, it is not a backtest.
+
+`backtest` steps the same graph over every trading day in a date range, fetching
+(and caching under `data/historical/`) real underlying bars from IB and, for every
+fill, the real historical option quote for that exact contract/day. There is no
+synthetic-price fallback: candidate strikes/expirations are generated the same
+mechanical way `replay` does (nearest strike to spot, nearest non-0DTE Friday),
+but the instant a specific fill can't be priced from real IB data (illiquid
+strike, or an expired contract that fails to qualify) the backtest aborts
+immediately with the offending contract/day named in the error, rather than
+quietly mixing in a guessed price — a partially-synthetic PnL number would be
+worse than no number. It prints an aggregate win-rate/PnL/drawdown summary and
+writes a per-trade ledger + daily equity curve to
+`logs/backtests/<symbol>_<start>_<end>.json`. Known limitation: no market-holiday
+calendar (holidays are just days with no bars, silently skipped).
 
 ## Safety
 
@@ -86,9 +101,9 @@ fills — it validates plumbing and decision flow, **it is not a backtest**.
 
 ## Out of scope (v1)
 
-Backtesting/PnL analytics, multi-symbol scanning (the watchlist is a fixed list, not
-a scanner), dashboards, greeks/IV modeling, spreads, limit orders, broker-side stops
-(the mental stop is enforced by the loop), holiday calendar. Market orders only.
+Multi-symbol scanning (the watchlist is a fixed list, not a scanner), dashboards,
+greeks/IV modeling, spreads, limit orders, broker-side stops (the mental stop is
+enforced by the loop), holiday calendar. Market orders only.
 
 Fixed watchlist (`SYMBOLS=SPY,AAPL,MSFT,NVDA`, one comma-separated env var) — each
 symbol runs its own independent `TradingSession` (own position, own daily trade

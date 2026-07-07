@@ -138,7 +138,7 @@ class TradingSession:
 
     # -- replay ------------------------------------------------------------------
 
-    def run_replay(self, broker: StubBroker, warmup_minutes: int = 10) -> None:
+    def run_replay(self, broker: StubBroker, warmup_minutes: int = 10, verbose: bool = True) -> None:
         """Step the same graph through a recorded day, one bar at a time."""
         day = broker.bars[0].ts.astimezone(ET).date()
         start = datetime.combine(day, RTH_OPEN, tzinfo=ET)
@@ -150,10 +150,12 @@ class TradingSession:
             if now_et.time() >= RTH_CLOSE:
                 break
             out = self.tick()
-            self._print_tick(out)
+            if verbose:
+                self._print_tick(out)
             if not broker.advance():
                 break
-        self._replay_summary(broker)
+        if verbose:
+            self._replay_summary(broker)
 
     def _replay_summary(self, broker: StubBroker) -> None:
         print("\n--- replay summary ---")
