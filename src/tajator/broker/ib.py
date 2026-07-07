@@ -117,12 +117,11 @@ class IBBroker(Broker):
         params = self.ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
         if not params:
             return ChainParams(expirations=[], strikes=[])
-        # Prefer SMART; some gateways return no SMART entry, so fall back to the
-        # richest chain (thin per-venue entries with a handful of strikes exist).
-        best = next(
-            (p for p in params if p.exchange == "SMART"),
-            max(params, key=lambda p: (len(p.strikes), len(p.expirations))),
-        )
+        # A symbol can return several entries per exchange (one per trading
+        # class, some with only a couple of strikes). Prefer SMART entries,
+        # then take the richest chain among them.
+        smarts = [p for p in params if p.exchange == "SMART"] or list(params)
+        best = max(smarts, key=lambda p: (len(p.strikes), len(p.expirations)))
         chain = ChainParams(
             expirations=sorted(best.expirations), strikes=sorted(best.strikes)
         )
