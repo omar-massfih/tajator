@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import time
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001}  # IB Gateway live; 4002 = IB Gateway paper
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     market_data_type: int = 1
 
     # Strategy
-    symbol: str = "SPY"
+    symbols: Annotated[list[str], NoDecode] = ["SPY"]
     max_trades_per_day: int = 2
     max_contracts: int = 4
     max_premium_usd: float = 500.0
@@ -44,6 +44,13 @@ class Settings(BaseSettings):
         if isinstance(v, str) and ":" in v:
             hh, mm = v.split(":")
             return time(int(hh), int(mm))
+        return v
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _parse_symbols(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [s.strip().upper() for s in v.split(",") if s.strip()]
         return v
 
     @model_validator(mode="after")

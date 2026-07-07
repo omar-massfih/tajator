@@ -29,6 +29,7 @@ class RuntimeContext:
     settings: Settings
     broker: Broker
     journal: Journal
+    symbol: str
     use_llm: bool = True
     _llm: Any = field(default=None, repr=False)
 
@@ -43,15 +44,15 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     settings = ctx.settings
 
     def fetch_data(state: AgentState) -> dict:
-        bars = ctx.broker.get_bars(settings.symbol)
-        prev_high, prev_low = ctx.broker.get_prev_day_range(settings.symbol)
+        bars = ctx.broker.get_bars(ctx.symbol)
+        prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
         return {"bars": bars, "prev_day_high": prev_high, "prev_day_low": prev_low}
 
     def compute_context(state: AgentState) -> dict:
         bars = state["bars"]
         if not bars:
             raise RuntimeError("broker returned no bars (data farm down or market closed)")
-        snapshot = build_snapshot(settings.symbol, bars)
+        snapshot = build_snapshot(ctx.symbol, bars)
         levels = detect_levels(bars, state.get("prev_day_high"), state.get("prev_day_low"))
         return {"snapshot": snapshot, "levels": levels}
 
@@ -62,7 +63,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         pos.update_extreme(position, snapshot.price)
         action = pos.evaluate(position, snapshot)
         if action.kind != "hold":
-            ctx.journal.write("manage_signal", ts=snapshot.ts, action=action)
+            ctx.journal.write("manage_signal", ts=snapshot.ts, symbol=ctx.symbol, action=action)
         return {"manage_action": action}
 
     def llm_manage(state: AgentState) -> dict:
@@ -79,14 +80,14 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
                 decision = decide_scale(ctx.llm, text)
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key at LLM construction
                 decision = Decision(action="scale_out", reasoning=f"LLM unavailable ({exc}); scaling by default")
-        ctx.journal.write("llm_decision", ts=snapshot.ts, mode="manage", decision=decision)
+        ctx.journal.write("llm_decision", ts=snapshot.ts, symbol=ctx.symbol, mode="manage", decision=decision)
         return {"decision": decision}
 
     def do_scale_out(state: AgentState) -> dict:
         position, snapshot = state["position"], state["snapshot"]
         reason = state["manage_action"].reason
         action = execute_scale_out(ctx.broker, position, snapshot, reason)
-        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
         closed = position.qty_remaining == 0
         return {"actions": [action], "position": None if closed else position}
 
@@ -98,7 +99,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         else:
             kind, reason = "manual_exit", state["decision"].reasoning
         action = execute_exit(ctx.broker, position, snapshot, kind, reason)
-        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
         return {"actions": [action], "position": None}
 
     # ----- flat branch --------------------------------------------------------
@@ -107,7 +108,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         candidates = detect_candidates(state["bars"], state["levels"], state["snapshot"])
         if candidates:
             ctx.journal.write(
-                "candidates", ts=state["snapshot"].ts,
+                "candidates", ts=state["snapshot"].ts, symbol=ctx.symbol,
                 candidates=candidates, snapshot=state["snapshot"],
             )
         return {"candidates": candidates}
@@ -131,7 +132,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
                 decision = decide_entry(ctx.llm, text)
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key at LLM construction
                 decision = Decision(action="wait", reasoning=f"LLM unavailable ({exc}); waiting")
-        ctx.journal.write("llm_decision", ts=snapshot.ts, mode="entry", decision=decision)
+        ctx.journal.write("llm_decision", ts=snapshot.ts, symbol=ctx.symbol, mode="entry", decision=decision)
         return {"decision": decision}
 
     def risk_gate(state: AgentState) -> dict:
@@ -145,7 +146,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         )
         if not verdict.approved:
             ctx.journal.write(
-                "risk_veto", ts=state["snapshot"].ts,
+                "risk_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
                 decision=state["decision"], violations=verdict.violations,
             )
         return {"risk": verdict}
@@ -155,9 +156,9 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         direction = "call" if decision.action == "enter_call" else "put"
         position, action, skip = execute_entry(ctx.broker, settings, decision, direction, snapshot)
         if skip is not None:
-            ctx.journal.write("entry_skipped", ts=snapshot.ts, reason=skip, decision=decision)
+            ctx.journal.write("entry_skipped", ts=snapshot.ts, symbol=ctx.symbol, reason=skip, decision=decision)
             return {"skip_reason": skip}
-        ctx.journal.write("fill", ts=snapshot.ts, action=action, position=position)
+        ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
         return {
             "actions": [action],
             "position": position,

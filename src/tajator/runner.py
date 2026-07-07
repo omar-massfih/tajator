@@ -21,6 +21,11 @@ RTH_CLOSE = time(16, 0)
 log = logging.getLogger(__name__)
 
 
+def _sleep_to_next_minute() -> None:
+    now = time_mod.time()
+    time_mod.sleep(60 - (now % 60) + 2)  # +2s so the just-closed bar is available
+
+
 class TradingSession:
     def __init__(self, ctx: RuntimeContext):
         self.ctx = ctx
@@ -37,29 +42,15 @@ class TradingSession:
 
     # -- live ------------------------------------------------------------------
 
-    def run_live(self) -> None:
-        mode = self.ctx.settings.trading_mode.upper()
-        banner = f"=== tajator | {self.ctx.settings.symbol} | {mode} ==="
-        if mode == "LIVE":
-            banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
-        print(banner)
+    def _tick_once(self) -> None:
         try:
-            while True:
-                self._sleep_to_next_minute()
-                try:
-                    out = self.tick()
-                except Exception as exc:  # noqa: BLE001 — a bad tick must not kill the session
-                    log.exception("tick failed")
-                    self.ctx.journal.write("error", error=str(exc))
-                    print(f"tick failed ({exc}) — retrying next minute")
-                    continue
-                self._print_tick(out)
-        except KeyboardInterrupt:
-            self._on_interrupt()
-
-    def _sleep_to_next_minute(self) -> None:
-        now = time_mod.time()
-        time_mod.sleep(60 - (now % 60) + 2)  # +2s so the just-closed bar is available
+            out = self.tick()
+        except Exception as exc:  # noqa: BLE001 — a bad tick must not kill the session
+            log.exception("tick failed for %s", self.ctx.symbol)
+            self.ctx.journal.write("error", symbol=self.ctx.symbol, error=str(exc))
+            print(f"[{self.ctx.symbol}] tick failed ({exc}) — retrying next minute")
+            return
+        self._print_tick(out)
 
     def _print_tick(self, out: AgentState) -> None:
         snap = out.get("snapshot")
@@ -87,12 +78,12 @@ class TradingSession:
             f"\nopen position: {p.qty_remaining}x {p.contract.local_name} — flatten now? [y/N] "
         )
         if answer.strip().lower() == "y":
-            bars = self.ctx.broker.get_bars(self.ctx.settings.symbol, lookback_minutes=5)
+            bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
             from .market.indicators import build_snapshot
 
-            snap = build_snapshot(self.ctx.settings.symbol, bars)
+            snap = build_snapshot(self.ctx.symbol, bars)
             action = execute_exit(self.ctx.broker, p, snap, "manual_exit", "operator interrupt")
-            self.ctx.journal.write("fill", ts=snap.ts, action=action, position=p)
+            self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
             self.position = None
             print(f"flattened {action.qty}x @ {action.premium:.2f}")
         else:
@@ -131,3 +122,26 @@ class TradingSession:
         note = f" ({open_qty} contracts still open, excluded)" if open_qty else ""
         print(f"synthetic realized PnL: ${pnl:,.0f}{note}")
         print("note: option fills are synthetic — this validates plumbing, not profitability.")
+
+
+class LiveRunner:
+    """Drives one TradingSession per symbol through the same once-a-minute cadence."""
+
+    def __init__(self, sessions: list[TradingSession]):
+        self.sessions = sessions
+
+    def run(self) -> None:
+        mode = self.sessions[0].ctx.settings.trading_mode.upper()
+        symbols = ", ".join(sess.ctx.symbol for sess in self.sessions)
+        banner = f"=== tajator | {symbols} | {mode} ==="
+        if mode == "LIVE":
+            banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
+        print(banner)
+        try:
+            while True:
+                _sleep_to_next_minute()
+                for sess in self.sessions:
+                    sess._tick_once()
+        except KeyboardInterrupt:
+            for sess in self.sessions:
+                sess._on_interrupt()

@@ -29,8 +29,8 @@ class IBBroker(Broker):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.ib = IB()
-        self._stock: Stock | None = None
-        self._chain_cache: tuple[str, ChainParams] | None = None
+        self._stocks: dict[str, Stock] = {}
+        self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
         self._qualified: dict[str, Option] = {}
         self._delayed = False
 
@@ -60,11 +60,11 @@ class IBBroker(Broker):
         return self.ib.isConnected()
 
     def _underlying(self, symbol: str) -> Stock:
-        if self._stock is None or self._stock.symbol != symbol:
+        if symbol not in self._stocks:
             stock = Stock(symbol, "SMART", "USD")
             self.ib.qualifyContracts(stock)
-            self._stock = stock
-        return self._stock
+            self._stocks[symbol] = stock
+        return self._stocks[symbol]
 
     # -- Broker interface -----------------------------------------------------------
 
@@ -111,8 +111,9 @@ class IBBroker(Broker):
 
     def get_option_chain(self, symbol: str) -> ChainParams:
         today = self.now().date().isoformat()
-        if self._chain_cache and self._chain_cache[0] == f"{symbol}:{today}":
-            return self._chain_cache[1]
+        cached = self._chain_cache.get(symbol)
+        if cached and cached[0] == today:
+            return cached[1]
         stock = self._underlying(symbol)
         params = self.ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
         if not params:
@@ -125,7 +126,7 @@ class IBBroker(Broker):
         chain = ChainParams(
             expirations=sorted(best.expirations), strikes=sorted(best.strikes)
         )
-        self._chain_cache = (f"{symbol}:{today}", chain)
+        self._chain_cache[symbol] = (today, chain)
         return chain
 
     def _option(self, contract: SelectedContract) -> Option:

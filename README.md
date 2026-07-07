@@ -86,9 +86,15 @@ fills — it validates plumbing and decision flow, **it is not a backtest**.
 
 ## Out of scope (v1)
 
-Backtesting/PnL analytics, multi-symbol scanning, dashboards, greeks/IV modeling,
-spreads, limit orders, broker-side stops (the mental stop is enforced by the loop),
-holiday calendar. Single symbol (`SYMBOL=SPY`), market orders only.
+Backtesting/PnL analytics, multi-symbol scanning (the watchlist is a fixed list, not
+a scanner), dashboards, greeks/IV modeling, spreads, limit orders, broker-side stops
+(the mental stop is enforced by the loop), holiday calendar. Market orders only.
+
+Fixed watchlist (`SYMBOLS=SPY,AAPL,MSFT,NVDA`, one comma-separated env var) — each
+symbol runs its own independent `TradingSession` (own position, own daily trade
+counter) sharing one IB connection, journal, and LLM client. `check-ib` checks
+connectivity for every configured symbol; `replay` still exercises one symbol per
+run via `--symbol` (defaults to the first configured symbol).
 
 **This is an experimental system for paper trading. Options trading involves
 substantial risk of loss. Do not point it at real money.**

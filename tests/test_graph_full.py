@@ -23,7 +23,9 @@ CSV = Path(__file__).parent / "data" / "spy_sample_day.csv"
 def session(tmp_path):
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
     broker = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
-    ctx = RuntimeContext(settings=settings, broker=broker, journal=Journal(tmp_path), use_llm=False)
+    ctx = RuntimeContext(
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+    )
     return TradingSession(ctx), broker, tmp_path
 
 
@@ -60,3 +62,31 @@ def test_kill_switch_blocks_all_entries(session):
     sess.ctx.settings.kill_switch_file.write_text("stop")
     sess.run_replay(broker)
     assert broker.fills == [], "kill switch must prevent every entry"
+
+
+def test_two_symbol_sessions_keep_independent_state(tmp_path):
+    """Two TradingSessions sharing one journal must not share position/trades_today."""
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
+    journal = Journal(tmp_path)
+
+    broker_spy = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
+    broker_aapl = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
+
+    sess_spy = TradingSession(
+        RuntimeContext(settings=settings, broker=broker_spy, journal=journal, symbol="SPY", use_llm=False)
+    )
+    sess_aapl = TradingSession(
+        RuntimeContext(settings=settings, broker=broker_aapl, journal=journal, symbol="AAPL", use_llm=False)
+    )
+
+    sess_spy.run_replay(broker_spy)
+    assert sess_spy.trades_today == 1
+    assert sess_aapl.trades_today == 0, "AAPL session must be untouched by SPY's replay"
+
+    sess_aapl.run_replay(broker_aapl)
+    assert sess_aapl.trades_today == 1
+    assert sess_spy.trades_today == 1, "SPY session's counter must not be affected by AAPL's replay"
+
+    content = "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
+    assert '"symbol": "SPY"' in content
+    assert '"symbol": "AAPL"' in content
