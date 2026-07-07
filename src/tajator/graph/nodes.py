@@ -49,6 +49,8 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
 
     def compute_context(state: AgentState) -> dict:
         bars = state["bars"]
+        if not bars:
+            raise RuntimeError("broker returned no bars (data farm down or market closed)")
         snapshot = build_snapshot(settings.symbol, bars)
         levels = detect_levels(bars, state.get("prev_day_high"), state.get("prev_day_low"))
         return {"snapshot": snapshot, "levels": levels}

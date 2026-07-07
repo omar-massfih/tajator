@@ -115,11 +115,16 @@ class IBBroker(Broker):
             return self._chain_cache[1]
         stock = self._underlying(symbol)
         params = self.ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
-        smart = next((p for p in params if p.exchange == "SMART"), params[0] if params else None)
-        if smart is None:
+        if not params:
             return ChainParams(expirations=[], strikes=[])
+        # Prefer SMART; some gateways return no SMART entry, so fall back to the
+        # richest chain (thin per-venue entries with a handful of strikes exist).
+        best = next(
+            (p for p in params if p.exchange == "SMART"),
+            max(params, key=lambda p: (len(p.strikes), len(p.expirations))),
+        )
         chain = ChainParams(
-            expirations=sorted(smart.expirations), strikes=sorted(smart.strikes)
+            expirations=sorted(best.expirations), strikes=sorted(best.strikes)
         )
         self._chain_cache = (f"{symbol}:{today}", chain)
         return chain

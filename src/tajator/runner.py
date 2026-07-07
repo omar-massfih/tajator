@@ -46,7 +46,13 @@ class TradingSession:
         try:
             while True:
                 self._sleep_to_next_minute()
-                out = self.tick()
+                try:
+                    out = self.tick()
+                except Exception as exc:  # noqa: BLE001 — a bad tick must not kill the session
+                    log.exception("tick failed")
+                    self.ctx.journal.write("error", error=str(exc))
+                    print(f"tick failed ({exc}) — retrying next minute")
+                    continue
                 self._print_tick(out)
         except KeyboardInterrupt:
             self._on_interrupt()
