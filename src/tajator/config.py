@@ -6,7 +6,7 @@ from datetime import time
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .market.levels import DOUBLE_MIN_PULLBACK_PCT, DOUBLE_MIN_TOUCH_SEPARATION_BARS
@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     ib_client_id: int = 17
     trading_mode: Literal["paper", "live"] = "paper"
     market_data_type: int = 1
+    # Paper-sim fills can take minutes without live option data (see the
+    # 2026-07-08 incident) — a working market order is not a failure, and
+    # cancelling it is what creates the cancel/fill race.
+    order_timeout_s: int = 120
+    fill_grace_s: int = 15  # post-cancel window for late execution reports
+    block_entries_on_delayed_data: bool = True
 
     # Strategy
     symbols: Annotated[list[str], NoDecode] = ["SPY"]
@@ -37,6 +43,13 @@ class Settings(BaseSettings):
     max_premium_usd: float = 500.0
     stop_buffer_cents: int = 40
     no_new_entries_after: time = time(15, 30)
+    # Broker-side protective stop: a GTC market sell resting at IB, triggered
+    # by the underlying crossing the plan's stop price. Backstop for the
+    # in-loop mental stop — protects the position when tajator is down.
+    protective_stop_enabled: bool = Field(
+        default=False, validation_alias=AliasChoices("PROTECTIVE_STOP", "protective_stop_enabled")
+    )
+    order_ref_prefix: str = "tajator"  # provenance tag on every order we place
 
     # Level quality gates (defaults live next to the algorithms in market/)
     double_min_touch_separation_bars: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS

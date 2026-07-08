@@ -64,6 +64,8 @@ not for live timing).
 
 ```bash
 uv run tajator check-ib     # connectivity: bars, chain, quote — places NO orders
+uv run tajator test-order   # paper diagnostic: buy 1 lot, watch the fill timeline, sell it back
+uv run tajator test-order --with-stop   # + place/verify/cancel a protective stop mid-trade
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
     --prev-high 503.5 --prev-low 497.0   # bundled synthetic day, no IB/LLM needed
 uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay with the LLM
@@ -71,6 +73,21 @@ uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-ll
 uv run tajator run          # live minute loop (paper) during market hours
 uv run pytest                     # full test suite
 ```
+
+`test-order` is the supervised acceptance check after any incident or config
+change: it places a real paper market order with **no** timeout-cancel, streams
+every order-status transition as it arrives, and reports the time-to-fill —
+distinguishing a slow paper-simulator fill (common without a live option-data
+subscription) from genuinely lost events. Run it (watching TWS) until fills are
+observed within `ORDER_TIMEOUT_S` before trusting `tajator run` again.
+
+With `PROTECTIVE_STOP=true`, every entry also rests a GTC market sell at IB,
+triggered by the *underlying* crossing the plan's stop price. The in-loop mental
+stop stays primary; the broker-side order is the backstop that protects the
+position when tajator is down, disconnected, or has lost track of it. The agent
+never sells while a stop might still be working (cancel-and-confirm first), and
+startup recognizes its own stops by `orderRef`, re-placing/cancelling as needed —
+anything foreign still refuses to launch.
 
 Replay steps the *same graph* through a recorded day with instant synthetic option
 fills — it validates plumbing and decision flow, it is not a backtest. Any position

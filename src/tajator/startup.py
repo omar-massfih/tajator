@@ -14,13 +14,14 @@ from __future__ import annotations
 import sys
 from datetime import date, datetime
 
-from .broker.base import BrokerOptionPosition
+from .broker.base import BrokerOpenOrder, BrokerOptionPosition, OrderFailed
 from .config import Settings
 from .journal import ET, Journal
-from .models import SelectedContract
+from .models import ProtectiveStop, SelectedContract
 from .notify import Notifier
 from .recovery import RecoveredSession, recover_sessions
 from .state_store import PersistedState, PersistedSession, StateStore
+from .trade.execution import restore_protective_stop, stop_order_ref
 
 
 def check_kill_switch(settings: Settings) -> None:
@@ -45,11 +46,14 @@ def run_startup_checks(
     """Order/position preflight. Returns the per-symbol state to seed the
     sessions with (adopted positions and today's trade counts); exits with an
     operator message when the account holds anything tajator cannot explain."""
-    orders = broker.open_option_orders(settings.symbols)
-    if orders:
+    orders = broker.open_option_orders_detailed(settings.symbols)
+    stop_prefix = f"{settings.order_ref_prefix}-stop:"
+    own_stops = [o for o in orders if o.order_ref.startswith(stop_prefix)]
+    foreign = [o for o in orders if not o.order_ref.startswith(stop_prefix)]
+    if foreign:
         sys.exit(
             "the IB account has resting orders in configured symbols:\n  "
-            + "\n  ".join(orders)
+            + "\n  ".join(_format_order(o) for o in foreign)
             + "\ntajator will not trade around orders it did not place "
             "(cancelling them here could race a fill).\n"
             "Cancel them in IB Gateway/TWS, then restart."
@@ -86,6 +90,17 @@ def run_startup_checks(
             "(journal replay could not explain these either).\n"
             "Flatten it manually in IB Gateway, or remove the symbol from SYMBOLS, then restart."
         )
+
+    stop_warnings, stop_refusals = reconcile_protective_stops(
+        settings, broker, adopt, own_stops
+    )
+    if stop_refusals:
+        sys.exit(
+            "protective stop reconciliation failed:\n  "
+            + "\n  ".join(stop_refusals)
+            + "\nReconcile the account in IB Gateway, then restart."
+        )
+    warnings += stop_warnings
 
     for warning in warnings:
         journal.write("startup_warning", warning=warning)
@@ -126,6 +141,116 @@ def run_startup_checks(
         # seed the file now so it reflects reality even if the first tick fails
         store.update(symbol, sess.position, sess.trades_today, today)
     return adopt
+
+
+def _format_order(o: BrokerOpenOrder) -> str:
+    return f"{o.action} {o.qty:g}x {o.local_symbol} ({o.order_type}, status {o.status})"
+
+
+def reconcile_protective_stops(
+    settings: Settings,
+    broker,
+    adopt: dict[str, PersistedSession],
+    stop_orders: list[BrokerOpenOrder],
+) -> tuple[list[str], list[str]]:
+    """Match our own resting protective stops (proven by orderRef) against the
+    adopted positions. This is the one place startup mutates the account —
+    justified because the ref proves provenance and every cancel is
+    confirm-checked, with a refusal on any surprise fill. Foreign orders never
+    reach here. Returns (warnings, refusals)."""
+    warnings: list[str] = []
+    refusals: list[str] = []
+    by_symbol: dict[str, list[BrokerOpenOrder]] = {}
+    for o in stop_orders:
+        by_symbol.setdefault(o.symbol, []).append(o)
+
+    for symbol in settings.symbols:
+        sess = adopt.get(symbol)
+        pos = sess.position if sess else None
+        if pos is not None:
+            pos.protective_stop = None  # persisted ids are stale until re-proven live
+        matched: BrokerOpenOrder | None = None
+        for o in by_symbol.pop(symbol, []):
+            if (
+                matched is None
+                and pos is not None
+                and o.order_ref == stop_order_ref(settings, symbol)
+                and o.action == "SELL"
+                and _order_covers(pos.contract, o)
+                and o.qty == pos.qty_remaining
+            ):
+                matched = o
+                continue
+            # ours, but stale: no position, wrong contract, or wrong qty
+            _cancel_startup_stop(broker, o, warnings, refusals)
+        if pos is None:
+            continue
+        if matched is not None:
+            pos.protective_stop = ProtectiveStop(
+                order_id=matched.order_id, perm_id=matched.perm_id,
+                order_ref=matched.order_ref, qty=matched.qty,
+                stop_price=pos.plan.stop_price,
+            )
+        elif settings.protective_stop_enabled:
+            restore_protective_stop(broker, settings, pos, symbol)
+            if pos.protective_stop is not None:
+                warnings.append(
+                    f"{symbol}: protective stop was missing — re-placed for "
+                    f"{pos.qty_remaining}x {pos.contract.local_name} at {pos.plan.stop_price}"
+                )
+            else:
+                warnings.append(
+                    f"{symbol}: protective stop was missing and could NOT be re-placed — "
+                    "the position is protected by the in-loop stop only"
+                )
+
+    # stops with our ref on symbols no longer configured — stale, cancel them
+    for leftovers in by_symbol.values():
+        for o in leftovers:
+            _cancel_startup_stop(broker, o, warnings, refusals)
+    return warnings, refusals
+
+
+def _cancel_startup_stop(
+    broker, o: BrokerOpenOrder, warnings: list[str], refusals: list[str]
+) -> None:
+    """Cancel-and-confirm one stale own-ref stop. A cancel that reveals fills
+    (or cannot confirm) is a refusal — something executed that no session saw."""
+    contract = SelectedContract(
+        symbol=o.symbol, expiry=o.expiry, strike=o.strike,
+        right=o.right if o.right in ("C", "P") else "C",
+        con_id=o.con_id or None,
+    )
+    stop = ProtectiveStop(
+        order_id=o.order_id, perm_id=o.perm_id, order_ref=o.order_ref,
+        qty=o.qty, stop_price=0.0,
+    )
+    try:
+        result = broker.cancel_protective_stop(contract, stop, expected_held=None)
+    except OrderFailed as exc:
+        refusals.append(f"could not cleanly cancel protective stop {o.order_id} ({o.local_symbol}): {exc}")
+        return
+    if result.filled_qty:
+        refusals.append(
+            f"cancelling stale protective stop {o.order_id} ({o.local_symbol}) revealed "
+            f"{result.filled_qty} filled contract(s) — an execution no session accounted for"
+        )
+    else:
+        warnings.append(
+            f"{o.symbol}: cancelled stale protective stop {o.order_id} "
+            f"(SELL {o.qty}x {o.local_symbol})"
+        )
+
+
+def _order_covers(contract: SelectedContract, o: BrokerOpenOrder) -> bool:
+    if contract.con_id and o.con_id and contract.con_id != o.con_id:
+        return False
+    return (
+        contract.symbol == o.symbol
+        and contract.expiry == o.expiry
+        and contract.strike == o.strike
+        and contract.right == o.right
+    )
 
 
 def attempt_journal_recovery(
@@ -242,9 +367,14 @@ def reconcile_positions(
             if bp not in matches
         )
         if not matches:
+            how = (
+                "its protective stop likely fired while tajator was offline"
+                if pos.protective_stop is not None
+                else "closed externally"
+            )
             warnings.append(
                 f"{symbol}: persisted position {pos.qty_remaining}x {pos.contract.local_name} "
-                "is gone at the broker — closed externally; starting flat"
+                f"is gone at the broker — {how}; starting flat"
             )
             adopt[symbol] = PersistedSession(trades_today=trades)
             continue

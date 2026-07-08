@@ -14,30 +14,45 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ib_async import IB, MarketOrder, Option, Stock
+from ib_async.order import PriceCondition
 
 from ..config import Settings
-from ..models import Bar, SelectedContract
-from .base import Broker, BrokerOptionPosition, ChainParams, Fill, OrderFailed
+from ..journal import Journal
+from ..models import Bar, Direction, ProtectiveStop, SelectedContract
+from .base import (
+    Broker,
+    BrokerOpenOrder,
+    BrokerOptionPosition,
+    ChainParams,
+    Fill,
+    OrderFailed,
+    StopCancelResult,
+    StopStatus,
+)
 
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger(__name__)
 
 NO_SUBSCRIPTION_CODES = {354, 10167, 10197}
-ORDER_TIMEOUT_S = 30
 CANCEL_TIMEOUT_S = 10
-FILL_GRACE_S = 5  # after a cancel, wait this long for late execution reports
+STOP_ACK_TIMEOUT_S = 5  # wait for a protective stop to acknowledge at IB
 
 
 class IBBroker(Broker):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.ib = IB()
+        self.journal: Journal | None = None  # set by callers that want order timelines
         self._stocks: dict[str, Stock] = {}
         self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
         self._qualified: dict[str, Option] = {}
         self._delayed = False
         # subscribe before connect() so connect-time errors are seen too
         self.ib.errorEvent += self._on_error
+        # always-on order diagnostics — the 07-08 incident was undiagnosable
+        # without a record of when statuses and executions actually arrived
+        self.ib.orderStatusEvent += self._on_order_status
+        self.ib.execDetailsEvent += self._on_exec_details
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -73,8 +88,47 @@ class IBBroker(Broker):
                 "Fine for plumbing tests, NOT for timing real entries.", errorCode,
             )
 
+    def _on_order_status(self, trade) -> None:
+        o, s = trade.order, trade.orderStatus
+        log.info(
+            "order status #%s/%s [%s] %s %gx %s: %s (filled %g @ %s)",
+            o.orderId, o.permId or "-", o.orderRef or "-", o.action, o.totalQuantity,
+            getattr(trade.contract, "localSymbol", "") or trade.contract.symbol,
+            s.status, s.filled or 0, s.avgFillPrice or 0,
+        )
+
+    def _on_exec_details(self, trade, fill) -> None:
+        ex = fill.execution
+        log.info(
+            "execution #%s/%s: %s %gx @ %s (%s)",
+            ex.orderId, ex.permId or "-", ex.side, ex.shares, ex.price, ex.time,
+        )
+
+    def _journal_order_timeline(self, trade, label: str) -> None:
+        """Persist the order's full status history — when each state actually
+        arrived is the evidence that separates a slow fill from a lost one."""
+        if self.journal is None:
+            return
+        o = trade.order
+        self.journal.write(
+            "order_timeline",
+            symbol=getattr(trade.contract, "symbol", ""),
+            label=label,
+            order_id=o.orderId,
+            perm_id=o.permId or None,
+            order_ref=o.orderRef or "",
+            timeline=[
+                {"t": e.time.isoformat(), "status": e.status, "msg": e.message}
+                for e in getattr(trade, "log", [])
+            ],
+        )
+
     def is_connected(self) -> bool:
         return self.ib.isConnected()
+
+    @property
+    def is_delayed_data(self) -> bool:
+        return self._delayed
 
     def option_positions(self, symbols: list[str]) -> list[BrokerOptionPosition]:
         """Existing option positions in the account for the given underlyings.
@@ -104,10 +158,10 @@ class IBBroker(Broker):
             for p in self.option_positions(symbols)
         ]
 
-    def open_option_orders(self, symbols: list[str]) -> list[str]:
-        """Resting orders at IB for the given underlyings, as human-readable
-        strings. reqAllOpenOrders sees orders from other client IDs and manual
-        TWS orders too — e.g. one left working by a crashed session."""
+    def open_option_orders_detailed(self, symbols: list[str]) -> list[BrokerOpenOrder]:
+        """Resting orders at IB for the given underlyings. reqAllOpenOrders sees
+        orders from other client IDs and manual TWS orders too — e.g. one left
+        working by a crashed session — and re-binds our own GTC orders."""
         self.ib.reqAllOpenOrders()
         found = []
         for trade in self.ib.openTrades():
@@ -115,10 +169,30 @@ class IBBroker(Broker):
             if c.secType == "OPT" and c.symbol in symbols:
                 o = trade.order
                 found.append(
-                    f"{o.action} {o.totalQuantity:g}x {c.localSymbol or c.symbol} "
-                    f"({o.orderType}, status {trade.orderStatus.status})"
+                    BrokerOpenOrder(
+                        order_id=int(o.orderId or 0),
+                        perm_id=int(o.permId) if o.permId else None,
+                        order_ref=o.orderRef or "",
+                        action=o.action,
+                        qty=int(o.totalQuantity),
+                        order_type=o.orderType,
+                        status=trade.orderStatus.status,
+                        con_id=int(getattr(c, "conId", 0) or 0),
+                        local_symbol=c.localSymbol or c.symbol,
+                        symbol=c.symbol,
+                        expiry=getattr(c, "lastTradeDateOrContractMonth", "") or "",
+                        strike=float(getattr(c, "strike", 0) or 0),
+                        right=(getattr(c, "right", "") or "")[:1],
+                    )
                 )
         return found
+
+    def open_option_orders(self, symbols: list[str]) -> list[str]:
+        """Same, as human-readable strings for operator messages."""
+        return [
+            f"{o.action} {o.qty:g}x {o.local_symbol} ({o.order_type}, status {o.status})"
+            for o in self.open_option_orders_detailed(symbols)
+        ]
 
     def other_positions_summary(self, symbols: list[str]) -> list[str]:
         """Nonzero positions the startup guard does not gate on — stock, or
@@ -240,8 +314,10 @@ class IBBroker(Broker):
     def _place(self, contract: SelectedContract, side: str, qty: int) -> Fill:
         opt = self._option(contract)
         qty_before = self._snapshot_position(opt)
-        trade = self.ib.placeOrder(opt, MarketOrder(side, qty))
-        deadline = time.monotonic() + ORDER_TIMEOUT_S
+        order = MarketOrder(side, qty)
+        order.orderRef = f"{self.settings.order_ref_prefix}:{contract.symbol}"
+        trade = self.ib.placeOrder(opt, order)
+        deadline = time.monotonic() + self.settings.order_timeout_s
         while not trade.isDone() and time.monotonic() < deadline:
             self.ib.waitOnUpdate(timeout=1.0)
         if not trade.isDone():
@@ -266,7 +342,7 @@ class IBBroker(Broker):
         order that actually executed. Reconcile against execution reports and
         the account position, adopt whatever really filled, and halt new
         entries — any non-Filled outcome means the account needs a look."""
-        grace = time.monotonic() + FILL_GRACE_S  # let late execution reports land
+        grace = time.monotonic() + self.settings.fill_grace_s  # let late execution reports land
         while time.monotonic() < grace:
             self.ib.waitOnUpdate(timeout=1.0)
         status = trade.orderStatus.status
@@ -276,6 +352,7 @@ class IBBroker(Broker):
         confirmed = delta is not None and delta == from_fills
         filled = from_fills if confirmed else max(reported, from_fills, delta or 0)
         label = f"{side} {qty}x {contract.local_name} ended {status} (filled {filled}/{qty})"
+        self._journal_order_timeline(trade, label)
 
         premium = self._fill_premium(trade, filled)
         if filled and premium is not None:
@@ -339,6 +416,166 @@ class IBBroker(Broker):
             return float(total / shares)
         avg = trade.orderStatus.avgFillPrice
         return float(avg) if avg else None
+
+    # -- broker-side protective stop ------------------------------------------
+
+    def place_protective_stop(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        stop_price: float,
+        direction: Direction,
+        order_ref: str,
+    ) -> ProtectiveStop:
+        opt = self._option(contract)
+        under = self._underlying(contract.symbol)
+        order = MarketOrder("SELL", qty)
+        order.tif = "GTC"  # must survive overnight and the Gateway's restart
+        order.orderRef = order_ref
+        # The stop is on the UNDERLYING price (the plan's stop is an equity
+        # price): calls stop out when the stock falls through it, puts when
+        # it rises through it.
+        order.conditions = [
+            PriceCondition(
+                price=stop_price, conId=under.conId, exch="SMART",
+                isMore=(direction == "put"),
+            )
+        ]
+        order.conditionsIgnoreRth = False  # a weird pre-market print must not trigger it
+        trade = self.ib.placeOrder(opt, order)
+        deadline = time.monotonic() + STOP_ACK_TIMEOUT_S
+        while time.monotonic() < deadline:
+            status = trade.orderStatus.status
+            if status in ("PreSubmitted", "Submitted", "Filled"):
+                break
+            if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                self._journal_order_timeline(trade, f"protective stop for {contract.local_name} rejected")
+                raise RuntimeError(
+                    f"IB rejected the protective stop for {qty}x {contract.local_name}: {status}"
+                )
+            self.ib.waitOnUpdate(timeout=1.0)
+        # An unacknowledged order may still be live at IB — record it rather
+        # than raise, so it is never left working untracked.
+        log.info(
+            "protective stop placed: SELL %dx %s if %s %s %.2f (order %s, ref %s)",
+            qty, contract.local_name, contract.symbol,
+            ">=" if direction == "put" else "<=", stop_price,
+            trade.order.orderId, order_ref,
+        )
+        return ProtectiveStop(
+            order_id=int(trade.order.orderId),
+            perm_id=int(trade.order.permId) if trade.order.permId else None,
+            order_ref=order_ref,
+            qty=qty,
+            stop_price=stop_price,
+        )
+
+    def cancel_protective_stop(
+        self,
+        contract: SelectedContract,
+        stop: ProtectiveStop,
+        expected_held: int | None = None,
+    ) -> StopCancelResult:
+        opt = self._option(contract)
+        trade = self._find_stop_trade(stop)
+        if trade is not None and not trade.isDone():
+            self.ib.cancelOrder(trade.order)
+            deadline = time.monotonic() + CANCEL_TIMEOUT_S
+            while not trade.isDone() and time.monotonic() < deadline:
+                self.ib.waitOnUpdate(timeout=1.0)
+            if not trade.isDone():
+                # The stop may still execute — the caller must NOT sell.
+                self._halt_new_entries(
+                    f"protective stop {stop.order_id} for {contract.local_name} "
+                    "cancel never confirmed — reconcile in IB Gateway"
+                )
+                raise OrderFailed(
+                    f"cancel of protective stop {stop.order_id} for {contract.local_name} "
+                    "never reached a terminal state.",
+                    side="SELL", requested=stop.qty, filled=0, suspect=True,
+                )
+            grace = time.monotonic() + self.settings.fill_grace_s
+            while time.monotonic() < grace:  # a cancel can race the stop's fill
+                self.ib.waitOnUpdate(timeout=1.0)
+        if trade is not None:
+            self._journal_order_timeline(trade, f"protective stop cancel for {contract.local_name}")
+            filled = int(sum(f.execution.shares for f in trade.fills))
+            avg = self._fill_premium(trade, filled)
+        else:
+            filled, avg = self._stop_executions(stop)
+        # Cross-check the account: it should hold exactly what the caller
+        # tracked, minus what the stop sold. Anything else means fills this
+        # session cannot see.
+        held = self._snapshot_position(opt) if expected_held is not None else None
+        if held is not None and held != expected_held - filled:
+            self._halt_new_entries(
+                f"protective stop {stop.order_id} for {contract.local_name}: account holds "
+                f"{held} but reports explain {expected_held - filled} — reconcile in IB Gateway"
+            )
+            raise OrderFailed(
+                f"protective stop {stop.order_id} for {contract.local_name}: position/execution "
+                "mismatch after cancel — true fill count unconfirmed.",
+                side="SELL", requested=stop.qty, filled=filled, suspect=True,
+            )
+        if filled and avg is None:
+            self._halt_new_entries(
+                f"protective stop {stop.order_id} for {contract.local_name} filled {filled} "
+                "with no priced executions — reconcile in IB Gateway"
+            )
+            raise OrderFailed(
+                f"protective stop {stop.order_id} filled {filled}x {contract.local_name} "
+                "but no execution prices arrived.",
+                side="SELL", requested=stop.qty, filled=filled, suspect=True,
+            )
+        return StopCancelResult(cancelled=True, filled_qty=filled, avg_price=avg)
+
+    def poll_protective_stop(
+        self, contract: SelectedContract, stop: ProtectiveStop
+    ) -> StopStatus:
+        trade = self._find_stop_trade(stop)
+        if trade is None:
+            filled, avg = self._stop_executions(stop)
+            if filled >= stop.qty:
+                return StopStatus(state="filled", filled_qty=filled, avg_price=avg)
+            if filled:
+                return StopStatus(state="partial", filled_qty=filled, avg_price=avg)
+            return StopStatus(state="gone")
+        filled = int(sum(f.execution.shares for f in trade.fills)) or int(
+            trade.orderStatus.filled or 0
+        )
+        avg = self._fill_premium(trade, filled)
+        if trade.orderStatus.status == "Filled" or filled >= stop.qty:
+            self._journal_order_timeline(trade, f"protective stop for {contract.local_name} FILLED")
+            return StopStatus(state="filled", filled_qty=max(filled, stop.qty), avg_price=avg)
+        if filled:
+            working = 0 if trade.isDone() else stop.qty - filled
+            return StopStatus(state="partial", filled_qty=filled, avg_price=avg, working_qty=working)
+        if trade.isDone():  # cancelled externally, nothing executed
+            return StopStatus(state="gone")
+        return StopStatus(state="working", working_qty=stop.qty)
+
+    def _find_stop_trade(self, stop: ProtectiveStop):
+        """The live Trade for a protective stop, or None. reqAllOpenOrders
+        re-binds GTC orders after a restart, so persisted stops stay visible."""
+        self.ib.reqAllOpenOrders()
+        for trade in self.ib.trades():
+            o = trade.order
+            if stop.perm_id and getattr(o, "permId", 0) == stop.perm_id:
+                return trade
+            if int(o.orderId or 0) == stop.order_id and (o.orderRef or "") == stop.order_ref:
+                return trade
+        return None
+
+    def _stop_executions(self, stop: ProtectiveStop) -> tuple[int, float | None]:
+        """(shares, avg price) executed under a stop order this session, for
+        the case where the order object itself is no longer visible."""
+        total, cost = 0, 0.0
+        for f in self.ib.fills():
+            ex = f.execution
+            if (stop.perm_id and ex.permId == stop.perm_id) or ex.orderId == stop.order_id:
+                total += int(ex.shares)
+                cost += ex.shares * ex.price
+        return total, (cost / total if total else None)
 
     def _halt_new_entries(self, reason: str) -> None:
         log.error("%s — activating kill switch %s", reason, self.settings.kill_switch_file)

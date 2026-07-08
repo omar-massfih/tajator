@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
-from ..models import Bar, SelectedContract
+from ..models import Bar, Direction, ProtectiveStop, SelectedContract
 
 
 class ChainParams(BaseModel):
@@ -32,6 +33,43 @@ class BrokerOptionPosition(BaseModel):
     local_symbol: str
     qty: int
     avg_cost: float
+
+
+class BrokerOpenOrder(BaseModel):
+    """A resting order at the broker, with enough structure to recognize our own."""
+
+    order_id: int
+    perm_id: int | None = None
+    order_ref: str = ""
+    action: str
+    qty: int
+    order_type: str
+    status: str
+    con_id: int
+    local_symbol: str
+    symbol: str
+    expiry: str = ""  # YYYYMMDD
+    strike: float = 0.0
+    right: str = ""  # "C" | "P"
+
+
+class StopCancelResult(BaseModel):
+    """Outcome of cancelling a protective stop, reconciled against executions.
+    `filled_qty` counts contracts the stop sold before/despite the cancel —
+    the caller must shrink its own sell by that amount (double-sell guard)."""
+
+    cancelled: bool
+    filled_qty: int = 0
+    avg_price: float | None = None
+
+
+class StopStatus(BaseModel):
+    """Point-in-time state of a resting protective stop."""
+
+    state: Literal["working", "filled", "partial", "gone"]
+    filled_qty: int = 0
+    avg_price: float | None = None
+    working_qty: int = 0
 
 
 class OrderFailed(RuntimeError):
@@ -79,3 +117,42 @@ class Broker(ABC):
 
     @abstractmethod
     def sell_option(self, contract: SelectedContract, qty: int) -> Fill: ...
+
+    @property
+    def is_delayed_data(self) -> bool:
+        """True when quotes fell back to delayed data — entries should refuse."""
+        return False
+
+    # -- broker-side protective stop ------------------------------------------
+
+    @abstractmethod
+    def place_protective_stop(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        stop_price: float,
+        direction: Direction,
+        order_ref: str,
+    ) -> ProtectiveStop:
+        """Rest a GTC market sell of `qty` contracts, triggered by the
+        underlying crossing `stop_price`. Raises if the broker rejects it."""
+
+    @abstractmethod
+    def cancel_protective_stop(
+        self,
+        contract: SelectedContract,
+        stop: ProtectiveStop,
+        expected_held: int | None = None,
+    ) -> StopCancelResult:
+        """Cancel a resting stop and confirm the terminal state. MUST either
+        return a reconciled result or raise — never 'maybe still working'.
+        A raise means the caller must NOT sell (the stop may still execute).
+        `expected_held` is the position the caller believes the account holds
+        (usually qty_remaining); when given, the result is cross-checked
+        against the account and an unexplainable mismatch raises."""
+
+    @abstractmethod
+    def poll_protective_stop(
+        self, contract: SelectedContract, stop: ProtectiveStop
+    ) -> StopStatus:
+        """Non-mutating check of a resting stop's state."""

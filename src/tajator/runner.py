@@ -177,28 +177,39 @@ class TradingSession:
             try:
                 bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
                 snap = build_snapshot(self.ctx.symbol, bars)
-                action = execute_exit(self.ctx.broker, p, snap, "manual_exit", "operator interrupt")
+                actions = execute_exit(
+                    self.ctx.broker, self.ctx.settings, p, snap, "manual_exit", "operator interrupt"
+                )
             except Exception as exc:  # noqa: BLE001 — a failed flatten must still be reported
                 self.ctx.journal.write(
                     "error", symbol=self.ctx.symbol, error=f"interrupt flatten failed: {exc}", position=p
                 )
                 print(f"flatten failed ({exc}) — position left open, close it manually via IBKR.")
                 return
-            self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
-            self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
+            for action in actions:
+                self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
+                self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
+            sold = sum(a.qty for a in actions)
+            avg = sum(a.qty * a.premium for a in actions) / sold if sold else 0.0
             if p.qty_remaining:
                 self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
                 print(
-                    f"flattened only {action.qty}x @ {action.premium:.2f} — "
+                    f"flattened only {sold}x @ {avg:.2f} — "
                     f"{p.qty_remaining}x still open, close it manually via IBKR."
                 )
             else:
                 self.position = None
-                print(f"flattened {action.qty}x @ {action.premium:.2f}")
+                print(f"flattened {sold}x @ {avg:.2f}")
             self._persist()
         else:
             self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
-            print("position left open — close it manually via IBKR.")
+            if p.protective_stop is not None:
+                print(
+                    f"position left open — protective stop {p.protective_stop.order_id} stays "
+                    f"working GTC at {p.protective_stop.stop_price} (or close manually via IBKR)."
+                )
+            else:
+                print("position left open — close it manually via IBKR.")
 
     # -- replay ------------------------------------------------------------------
 
@@ -231,15 +242,17 @@ class TradingSession:
             return
         bars = broker.get_bars(self.ctx.symbol, lookback_minutes=5)
         snap = build_snapshot(self.ctx.symbol, bars)
-        action = execute_exit(
-            self.ctx.broker, self.position, snap, "manual_exit", "end of replay day — forced flat"
+        actions = execute_exit(
+            self.ctx.broker, self.ctx.settings, self.position, snap,
+            "manual_exit", "end of replay day — forced flat",
         )
-        self.ctx.journal.write(
-            "fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=self.position
-        )
+        for action in actions:
+            self.ctx.journal.write(
+                "fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=self.position
+            )
         self.position = None
-        if verbose:
-            print(f"end of day — flattened {action.qty}x @ {action.premium:.2f}")
+        if verbose and actions:
+            print(f"end of day — flattened {actions[-1].qty}x @ {actions[-1].premium:.2f}")
 
     def _replay_summary(self, broker: StubBroker) -> None:
         print("\n--- replay summary ---")
@@ -315,14 +328,20 @@ class LiveRunner:
             if sess.position is None:
                 continue
             p = sess.position
+            stop_note = (
+                f" (protective stop {p.protective_stop.order_id} stays working GTC "
+                f"at {p.protective_stop.stop_price})"
+                if p.protective_stop is not None
+                else ""
+            )
             log.warning(
-                "%s: session closed with open position %dx %s — it will be managed "
+                "%s: session closed with open position %dx %s%s — it will be managed "
                 "again tomorrow; close it manually via IBKR if that is not intended",
-                sess.ctx.symbol, p.qty_remaining, p.contract.local_name,
+                sess.ctx.symbol, p.qty_remaining, p.contract.local_name, stop_note,
             )
             print(
                 f"!!! {sess.ctx.symbol}: market closed with open position "
-                f"{p.qty_remaining}x {p.contract.local_name} — close manually via IBKR "
-                "or leave it to be managed tomorrow"
+                f"{p.qty_remaining}x {p.contract.local_name}{stop_note} — close manually "
+                "via IBKR or leave it to be managed tomorrow"
             )
             sess.ctx.journal.write("eod_open_position", symbol=sess.ctx.symbol, position=p)

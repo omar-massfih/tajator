@@ -23,6 +23,18 @@ def main() -> None:
     sub.add_parser("check-ib", help="connectivity check: bars, chain, quote — no orders")
     sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
+    test_order = sub.add_parser(
+        "test-order",
+        help="supervised paper diagnostic: buy 1 lot, watch the fill timeline, sell it back",
+    )
+    test_order.add_argument("--symbol", default=None, help="defaults to the first configured SYMBOLS entry")
+    test_order.add_argument("--qty", type=int, default=1)
+    test_order.add_argument("--wait", type=int, default=180, help="seconds to wait for each fill")
+    test_order.add_argument(
+        "--with-stop", action="store_true",
+        help="also place, verify, and cancel a protective stop while the position is open",
+    )
+
     replay = sub.add_parser("replay", help="step the graph through a recorded day (no IB orders)")
     src = replay.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", type=Path, help="CSV of 1-min bars (ts,open,high,low,close,volume)")
@@ -48,6 +60,8 @@ def main() -> None:
         cmd_run()
     elif args.command == "check-ib":
         cmd_check_ib()
+    elif args.command == "test-order":
+        cmd_test_order(args)
     elif args.command == "prep":
         cmd_prep()
     elif args.command == "backtest":
@@ -84,6 +98,7 @@ def cmd_run() -> None:
     check_kill_switch(settings)
     settings, broker = _ib_broker(settings)
     journal = Journal(settings.log_dir)
+    broker.journal = journal  # order timelines land next to the trade records
     notifier = (
         TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
         if settings.telegram_bot_token and settings.telegram_chat_id
@@ -153,6 +168,108 @@ def cmd_check_ib() -> None:
         print("\ncheck-ib complete. No orders were placed.")
     finally:
         broker.disconnect()
+
+
+def cmd_test_order(args) -> None:
+    """Supervised paper diagnostic (see the 2026-07-08 incident): observe the
+    natural fill latency of a market order WITHOUT the timeout-cancel path, so
+    slow paper-sim fills can be told apart from lost events. Watch TWS while
+    this runs. Exit code 0 only when the full round trip completed."""
+    import time as time_mod
+
+    from ib_async import MarketOrder
+
+    from .trade.contracts import select_contract
+
+    settings = load_settings()
+    if settings.trading_mode != "paper":
+        sys.exit("test-order is a paper diagnostic — refusing to run in live mode.")
+    settings, broker = _ib_broker(settings)
+    broker.journal = Journal(settings.log_dir)
+    symbol = (args.symbol or settings.symbols[0]).upper()
+
+    def stream(trade, wait_s: int) -> float | None:
+        """Print status/log lines as they arrive; returns seconds-to-done or None."""
+        start = time_mod.monotonic()
+        seen = 0
+        while True:
+            for e in trade.log[seen:]:
+                print(f"    {e.time.astimezone(ET):%H:%M:%S}  {e.status:<14} {e.message}")
+            seen = len(trade.log)
+            if trade.isDone():
+                return time_mod.monotonic() - start
+            if time_mod.monotonic() - start >= wait_s:
+                return None
+            broker.ib.waitOnUpdate(timeout=1.0)
+
+    ok = False
+    try:
+        print(f"accounts: {broker.ib.managedAccounts()}")
+        print(f"market data type requested: {settings.market_data_type}, "
+              f"delayed fallback active: {broker.is_delayed_data}")
+        bars = broker.get_bars(symbol, lookback_minutes=10)
+        if not bars:
+            sys.exit(f"no bars for {symbol} — is the market open?")
+        spot = bars[-1].close
+        chain = broker.get_option_chain(symbol)
+        contract = select_contract(chain, symbol, spot, "call", broker.now())
+        if contract is None:
+            sys.exit(f"no usable {symbol} contract in the chain")
+        opt = broker._option(contract)
+        [ticker] = broker.ib.reqTickers(opt)
+        print(f"{contract.local_name}: bid {ticker.bid} / ask {ticker.ask} / last {ticker.last} "
+              f"({'DELAYED' if broker.is_delayed_data else 'live'} quotes)")
+        if broker.is_delayed_data:
+            print("!!! quotes are DELAYED — expect slow/none paper fills; fix the market "
+                  "data subscription before trusting entry timing.")
+
+        print(f"\nplacing BUY {args.qty}x {contract.local_name} (market, NO timeout cancel) ...")
+        buy = MarketOrder("BUY", args.qty)
+        buy.orderRef = f"{settings.order_ref_prefix}-test:{symbol}"
+        buy_trade = broker.ib.placeOrder(opt, buy)
+        took = stream(buy_trade, args.wait)
+        broker._journal_order_timeline(buy_trade, f"test-order BUY {args.qty}x {contract.local_name}")
+        if took is None or buy_trade.orderStatus.status != "Filled":
+            print(f"\nNOT FILLED within {args.wait}s (status {buy_trade.orderStatus.status}).")
+            print("The order was NOT auto-cancelled — watch it in TWS and cancel it there "
+                  "once you have seen how long the paper engine takes.")
+            sys.exit(1)
+        filled_qty = int(buy_trade.orderStatus.filled)
+        print(f"filled {filled_qty}x @ {buy_trade.orderStatus.avgFillPrice} in {took:.1f}s")
+
+        if args.with_stop:
+            stop_price = round(spot - 1.00, 2)
+            print(f"\nplacing protective stop (SELL if {symbol} <= {stop_price}, GTC) ...")
+            stop = broker.place_protective_stop(
+                contract, filled_qty, stop_price, "call",
+                f"{settings.order_ref_prefix}-stop:{symbol}",
+            )
+            print(f"placed order {stop.order_id} (ref {stop.order_ref}) — check it shows in TWS")
+            status = broker.poll_protective_stop(contract, stop)
+            print(f"poll: {status.state} (working {status.working_qty})")
+            result = broker.cancel_protective_stop(contract, stop, expected_held=filled_qty)
+            print(f"cancel confirmed: cancelled={result.cancelled}, filled={result.filled_qty}")
+
+        print(f"\nselling {filled_qty}x back (market, NO timeout cancel) ...")
+        sell = MarketOrder("SELL", filled_qty)
+        sell.orderRef = f"{settings.order_ref_prefix}-test:{symbol}"
+        sell_trade = broker.ib.placeOrder(opt, sell)
+        took = stream(sell_trade, args.wait)
+        broker._journal_order_timeline(sell_trade, f"test-order SELL {filled_qty}x {contract.local_name}")
+        if took is None or sell_trade.orderStatus.status != "Filled":
+            print(f"\nSELL NOT FILLED within {args.wait}s (status {sell_trade.orderStatus.status}) — "
+                  "the position is still open; close it in TWS.")
+            sys.exit(1)
+        buy_px = float(buy_trade.orderStatus.avgFillPrice)
+        sell_px = float(sell_trade.orderStatus.avgFillPrice)
+        print(f"filled {int(sell_trade.orderStatus.filled)}x @ {sell_px} in {took:.1f}s")
+        print(f"\nround trip complete: PnL ${100 * filled_qty * (sell_px - buy_px):+.0f} "
+              "(timelines journaled as order_timeline events)")
+        ok = True
+    finally:
+        broker.disconnect()
+    if not ok:
+        sys.exit(1)
 
 
 def cmd_prep() -> None:

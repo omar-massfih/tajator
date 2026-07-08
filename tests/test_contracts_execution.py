@@ -70,12 +70,12 @@ def test_scale_and_exit_bookkeeping():
     position, _, _ = execute_entry(broker, settings, decision, "call", snap)
     start_qty = position.qty_remaining
 
-    a = execute_scale_out(broker, position, snap, "ema9 target")
+    [a] = execute_scale_out(broker, settings, position, snap, "ema9 target")
     assert a.kind == "scale_out"
     assert position.pieces_sold == 1
     assert position.qty_remaining == start_qty - a.qty
 
-    a = execute_exit(broker, position, snap, "stop_exit", "stop hit")
+    [a] = execute_exit(broker, settings, position, snap, "stop_exit", "stop hit")
     assert position.qty_remaining == 0
     assert a.qty == start_qty - position.plan.pieces[0]
     sells = [f for f in broker.fills if f[0] == "SELL"]
@@ -115,7 +115,7 @@ def test_partial_exit_leaves_remainder_tracked():
 
     partial = PartialFillBroker(broker.bars, cap=1)
     partial.cursor = broker.cursor
-    a = execute_exit(partial, position, snap, "stop_exit", "stop hit")
+    [a] = execute_exit(partial, settings, position, snap, "stop_exit", "stop hit")
     assert a.qty == 1
     assert position.qty_remaining == start_qty - 1, "unsold contracts must stay tracked for retry"
 
@@ -124,7 +124,7 @@ def test_partial_scale_out_does_not_advance_piece_schedule():
     from tajator.models import OpenPosition
     from tajator.trade.position import build_plan
 
-    _, broker, snap, _ = entry_setup()
+    settings, broker, snap, _ = entry_setup()
     contract = select_contract(CHAIN, "SPY", snap.price, "call", NOW)
     plan = build_plan(
         direction="call", level_price=499.0, stop_price=498.6,
@@ -135,7 +135,7 @@ def test_partial_scale_out_does_not_advance_piece_schedule():
 
     partial = PartialFillBroker(broker.bars, cap=1)
     partial.cursor = broker.cursor
-    a = execute_scale_out(partial, position, snap, "ema9 target")
+    [a] = execute_scale_out(partial, settings, position, snap, "ema9 target")
     assert a.qty == 1
     assert position.pieces_sold == 0, "a partially sold piece must be retried, not skipped"
     assert position.qty_remaining == 4

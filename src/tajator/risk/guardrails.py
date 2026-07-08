@@ -25,6 +25,7 @@ def entry_blockers(
     position: OpenPosition | None,
     trades_today: int,
     settings: Settings,
+    delayed_data: bool = False,
 ) -> list[str]:
     """Decision-independent entry vetoes — cheap enough to run before the LLM."""
     violations: list[str] = []
@@ -32,6 +33,11 @@ def entry_blockers(
 
     if settings.kill_switch_file.exists():
         violations.append("kill switch file present — no new entries")
+    if delayed_data and settings.block_entries_on_delayed_data:
+        violations.append(
+            "market data is DELAYED (no live subscription) — the paper fill engine "
+            "cannot fill against data we cannot see; no new entries"
+        )
     if now_et.weekday() >= 5:
         violations.append("market closed (weekend)")
     if not (RTH_OPEN <= now_et.time() <= settings.no_new_entries_after):
@@ -53,12 +59,14 @@ def check(
     trades_today: int,
     candidates: list[SetupCandidate],
     settings: Settings,
+    delayed_data: bool = False,
 ) -> RiskVerdict:
     if decision.action in ("wait", "scale_out", "exit"):
         return RiskVerdict(approved=True)
 
     violations = entry_blockers(
-        now=now, position=position, trades_today=trades_today, settings=settings
+        now=now, position=position, trades_today=trades_today, settings=settings,
+        delayed_data=delayed_data,
     )
 
     direction = "call" if decision.action == "enter_call" else "put"

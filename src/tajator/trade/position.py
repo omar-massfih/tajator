@@ -24,7 +24,7 @@ SCALE_REFS = ["ema9", "ema50_vwap", "hod_lod"]
 
 
 class ManageAction(BaseModel):
-    kind: Literal["hold", "stop_exit", "runner_exit", "scale_candidate"]
+    kind: Literal["hold", "stop_exit", "runner_exit", "scale_candidate", "broker_stop_filled"]
     target_ref: str | None = None
     reason: str = ""
 

@@ -67,6 +67,23 @@ def test_kill_switch_vetoes(settings):
     assert not verdict.approved and any("kill switch" in v for v in verdict.violations)
 
 
+def test_delayed_data_vetoes_entries(settings):
+    verdict = check(
+        GOOD_ENTRY, now=MIDDAY, position=None, trades_today=0,
+        candidates=[CANDIDATE], settings=settings, delayed_data=True,
+    )
+    assert not verdict.approved and any("DELAYED" in v for v in verdict.violations)
+
+
+def test_delayed_data_veto_can_be_disabled(settings):
+    settings.block_entries_on_delayed_data = False
+    verdict = check(
+        GOOD_ENTRY, now=MIDDAY, position=None, trades_today=0,
+        candidates=[CANDIDATE], settings=settings, delayed_data=True,
+    )
+    assert verdict.approved
+
+
 def test_weekend_vetoes(settings):
     saturday = MIDDAY + timedelta(days=5)
     assert not run_check(settings, now=saturday).approved

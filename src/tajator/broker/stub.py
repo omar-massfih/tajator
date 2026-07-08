@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..models import Bar, SelectedContract
-from .base import Broker, ChainParams, Fill
+from ..models import Bar, Direction, ProtectiveStop, SelectedContract
+from .base import Broker, ChainParams, Fill, StopCancelResult, StopStatus
 
 ET = ZoneInfo("America/New_York")
 BASE_EXTRINSIC = 1.50  # flat synthetic time value per contract
@@ -34,6 +34,11 @@ class StubBroker(Broker):
         self._chain = chain or self._default_chain()
         self.cursor = 0  # index of the latest visible bar
         self.fills: list[tuple[str, SelectedContract, Fill]] = []
+        # Protective stops are bookkept but never fire — replay exits are
+        # driven by the mental stop, so replay/backtest PnL is unchanged.
+        self.protective_stops: dict[int, ProtectiveStop] = {}
+        self.stop_calls: list[tuple[str, int]] = []  # ("place"|"cancel"|"poll", order_id)
+        self._next_order_id = 1
 
     @classmethod
     def from_csv(
@@ -111,3 +116,39 @@ class StubBroker(Broker):
         fill = Fill(premium=self.get_option_premium(contract), qty=qty, ts=self.now())
         self.fills.append(("SELL", contract, fill))
         return fill
+
+    # -- protective stop (bookkeeping only; never fires) -----------------------
+
+    def place_protective_stop(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        stop_price: float,
+        direction: Direction,
+        order_ref: str,
+    ) -> ProtectiveStop:
+        stop = ProtectiveStop(
+            order_id=self._next_order_id, order_ref=order_ref, qty=qty, stop_price=stop_price
+        )
+        self._next_order_id += 1
+        self.protective_stops[stop.order_id] = stop
+        self.stop_calls.append(("place", stop.order_id))
+        return stop
+
+    def cancel_protective_stop(
+        self,
+        contract: SelectedContract,
+        stop: ProtectiveStop,
+        expected_held: int | None = None,
+    ) -> StopCancelResult:
+        self.protective_stops.pop(stop.order_id, None)
+        self.stop_calls.append(("cancel", stop.order_id))
+        return StopCancelResult(cancelled=True)
+
+    def poll_protective_stop(
+        self, contract: SelectedContract, stop: ProtectiveStop
+    ) -> StopStatus:
+        self.stop_calls.append(("poll", stop.order_id))
+        if stop.order_id in self.protective_stops:
+            return StopStatus(state="working", working_qty=stop.qty)
+        return StopStatus(state="gone")

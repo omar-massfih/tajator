@@ -114,6 +114,18 @@ class PositionPlan(BaseModel):
     target_refs: list[str]  # e.g. ["ema9", "ema50_vwap", "hod_lod", "runner"]
 
 
+class ProtectiveStop(BaseModel):
+    """A resting broker-side stop: GTC market sell of the option, triggered by
+    the underlying crossing the plan's stop price. Backstop for the in-loop
+    mental stop — it protects the position while tajator is down or confused."""
+
+    order_id: int
+    perm_id: int | None = None
+    order_ref: str
+    qty: int
+    stop_price: float
+
+
 class OpenPosition(BaseModel):
     contract: SelectedContract
     plan: PositionPlan
@@ -121,6 +133,7 @@ class OpenPosition(BaseModel):
     pieces_sold: int = 0
     opened_at: datetime
     favorable_extreme: float | None = None  # best equity price seen, for VWAP runner rule
+    protective_stop: ProtectiveStop | None = None  # resting broker-side stop, if placed
 
 
 class ExecutedAction(BaseModel):

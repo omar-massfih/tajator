@@ -17,11 +17,16 @@ from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
 from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
-from ..models import Decision, MorningBriefing
+from ..models import Decision, ExecutedAction, MorningBriefing
 from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
 from ..trade import position as pos
-from ..trade.execution import execute_entry, execute_exit, execute_scale_out
+from ..trade.execution import (
+    execute_entry,
+    execute_exit,
+    execute_scale_out,
+    restore_protective_stop,
+)
 from .state import AgentState
 
 
@@ -71,8 +76,59 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
 
     # ----- position-open branch ---------------------------------------------
 
+    def sync_protective_stop(position, snapshot) -> dict | None:
+        """Reconcile the resting broker-side stop before managing: it may have
+        fired (or been touched externally) since the last tick. Returns a
+        state update ending the tick when the stop closed the position."""
+        stop = position.protective_stop
+        sold, avg = 0, None
+        if stop is not None:
+            status = ctx.broker.poll_protective_stop(position.contract, stop)
+            if status.state == "filled":
+                position.protective_stop = None
+                sold, avg = min(status.filled_qty, position.qty_remaining), status.avg_price
+            elif status.state == "partial":
+                # cancel-and-confirm is the authoritative fill count, and it
+                # guarantees no second stop order is left working
+                result = ctx.broker.cancel_protective_stop(
+                    position.contract, stop, expected_held=position.qty_remaining
+                )
+                position.protective_stop = None
+                sold, avg = min(result.filled_qty, position.qty_remaining), result.avg_price
+            elif status.state == "gone":
+                ctx.journal.write(
+                    "warning", ts=snapshot.ts, symbol=ctx.symbol,
+                    warning=f"protective stop order {stop.order_id} disappeared at the broker "
+                    "with no fills (cancelled externally?) — re-placing",
+                )
+                position.protective_stop = None
+        if sold:
+            position.qty_remaining -= sold
+            action = ExecutedAction(
+                kind="stop_exit", qty=sold,
+                premium=avg if avg is not None else 0.0,
+                equity_price=snapshot.price, ts=ctx.broker.now(),
+                reason="broker protective stop fired",
+            )
+            ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+            ctx.notifier.notify_fill(ctx.symbol, action, position)
+            if position.qty_remaining == 0:
+                return {
+                    "manage_action": pos.ManageAction(
+                        kind="broker_stop_filled", reason="broker protective stop fired"
+                    ),
+                    "actions": [action],
+                    "position": None,
+                }
+        # covers entry-time placement failure and the cases above
+        restore_protective_stop(ctx.broker, settings, position, ctx.symbol)
+        return None
+
     def manage_position(state: AgentState) -> dict:
         position, snapshot = state["position"], state["snapshot"]
+        done = sync_protective_stop(position, snapshot)
+        if done is not None:
+            return done
         pos.update_extreme(position, snapshot.price)
         action = pos.evaluate(position, snapshot)
         if action.kind != "hold":
@@ -99,11 +155,12 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def do_scale_out(state: AgentState) -> dict:
         position, snapshot = state["position"], state["snapshot"]
         reason = state["manage_action"].reason
-        action = execute_scale_out(ctx.broker, position, snapshot, reason)
-        ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
-        ctx.notifier.notify_fill(ctx.symbol, action, position)
+        actions = execute_scale_out(ctx.broker, settings, position, snapshot, reason)
+        for action in actions:
+            ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+            ctx.notifier.notify_fill(ctx.symbol, action, position)
         closed = position.qty_remaining == 0
-        return {"actions": [action], "position": None if closed else position}
+        return {"actions": actions, "position": None if closed else position}
 
     def do_exit(state: AgentState) -> dict:
         position, snapshot = state["position"], state["snapshot"]
@@ -112,11 +169,12 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             kind, reason = manage.kind, manage.reason
         else:
             kind, reason = "manual_exit", state["decision"].reasoning
-        action = execute_exit(ctx.broker, position, snapshot, kind, reason)
-        ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
-        ctx.notifier.notify_fill(ctx.symbol, action, position)
+        actions = execute_exit(ctx.broker, settings, position, snapshot, kind, reason)
+        for action in actions:
+            ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+            ctx.notifier.notify_fill(ctx.symbol, action, position)
         # a partial exit leaves contracts to retry on the next tick
-        return {"actions": [action], "position": position if position.qty_remaining else None}
+        return {"actions": actions, "position": position if position.qty_remaining else None}
 
     # ----- flat branch --------------------------------------------------------
 
@@ -138,6 +196,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             position=state.get("position"),
             trades_today=state.get("trades_today", 0),
             settings=settings,
+            delayed_data=ctx.broker.is_delayed_data,
         )
         if blockers:
             ctx.journal.write(
@@ -176,6 +235,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             trades_today=state.get("trades_today", 0),
             candidates=state["candidates"],
             settings=settings,
+            delayed_data=ctx.broker.is_delayed_data,
         )
         if not verdict.approved:
             ctx.journal.write(

@@ -5,10 +5,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from tajator.broker.base import BrokerOptionPosition
+from tajator.broker.base import BrokerOpenOrder, BrokerOptionPosition, StopCancelResult
 from tajator.config import Settings
 from tajator.journal import Journal
-from tajator.models import ExecutedAction, OpenPosition, SelectedContract
+from tajator.models import ExecutedAction, OpenPosition, ProtectiveStop, SelectedContract
 from tajator.notify import NullNotifier
 from tajator.startup import check_kill_switch, reconcile_positions, run_startup_checks
 from tajator.state_store import PersistedSession, PersistedState, StateStore
@@ -141,16 +141,31 @@ def test_trades_today_survives_same_day_restart_only():
 # -- run_startup_checks -------------------------------------------------------------
 
 
+def broker_order(
+    order_id=901, order_ref="", action="SELL", qty=2, status="Submitted",
+    con_id=222, symbol="NVDA", strike=200.0, right="P",
+):
+    return BrokerOpenOrder(
+        order_id=order_id, order_ref=order_ref, action=action, qty=qty,
+        order_type="MKT", status=status, con_id=con_id,
+        local_symbol=f"{symbol} 260710{right}00{strike:.0f}000", symbol=symbol,
+        expiry="20260710", strike=strike, right=right,
+    )
+
+
 class FakeBroker:
     def __init__(self, orders=(), positions=(), other=()):
         self.orders = list(orders)
         self.positions_ = list(positions)
         self.other = list(other)
+        self.cancelled: list[int] = []
+        self.placed_stops: list[ProtectiveStop] = []
+        self.cancel_result = StopCancelResult(cancelled=True)
 
     def now(self):
         return NOW
 
-    def open_option_orders(self, symbols):
+    def open_option_orders_detailed(self, symbols):
         return self.orders
 
     def option_positions(self, symbols):
@@ -158,6 +173,21 @@ class FakeBroker:
 
     def other_positions_summary(self, symbols):
         return self.other
+
+    def place_protective_stop(self, contract, qty, stop_price, direction, order_ref):
+        stop = ProtectiveStop(
+            order_id=900 + len(self.placed_stops), order_ref=order_ref,
+            qty=qty, stop_price=stop_price,
+        )
+        self.placed_stops.append(stop)
+        return stop
+
+    def cancel_protective_stop(self, contract, stop, expected_held=None):
+        self.cancelled.append(stop.order_id)
+        return self.cancel_result
+
+    def poll_protective_stop(self, contract, stop):
+        raise AssertionError("startup never polls")
 
 
 def run_checks(tmp_path, broker, state=None, **settings_kwargs):
@@ -171,7 +201,7 @@ def run_checks(tmp_path, broker, state=None, **settings_kwargs):
 
 def test_resting_orders_refuse_startup(tmp_path):
     with pytest.raises(SystemExit) as exc_info:
-        run_checks(tmp_path, FakeBroker(orders=["BUY 1x NVDA 260710P00200000 (MKT, status Submitted)"]))
+        run_checks(tmp_path, FakeBroker(orders=[broker_order(action="BUY", order_ref="")]))
     assert "resting orders" in str(exc_info.value)
     assert "NVDA" in str(exc_info.value)
 
@@ -208,6 +238,85 @@ def test_matching_position_is_adopted_and_reseeded(tmp_path):
     # the store must be seeded immediately, even before the first tick
     reloaded = StateStore(settings.state_file).load()
     assert reloaded.sessions["NVDA"].position.qty_remaining == 2
+
+
+# -- protective stop reconciliation ---------------------------------------------------
+
+STOP_REF = "tajator-stop:NVDA"
+
+
+def test_own_stop_matching_position_is_adopted(tmp_path):
+    pos = make_position(qty=2, con_id=222)
+    broker = FakeBroker(
+        orders=[broker_order(order_ref=STOP_REF, qty=2, con_id=222)],
+        positions=[broker_pos(qty=2, con_id=222)],
+    )
+    adopted, _ = run_checks(
+        tmp_path, broker, state=persisted(pos), protective_stop_enabled=True
+    )
+    stop = adopted["NVDA"].position.protective_stop
+    assert stop is not None and stop.order_id == 901
+    assert stop.stop_price == 200.9, "the adopted stop carries the plan's price"
+    assert broker.cancelled == [] and broker.placed_stops == []
+
+
+def test_adopted_position_without_stop_gets_one_replaced(tmp_path):
+    pos = make_position(qty=2, con_id=222)
+    broker = FakeBroker(positions=[broker_pos(qty=2, con_id=222)])
+    adopted, _ = run_checks(
+        tmp_path, broker, state=persisted(pos), protective_stop_enabled=True
+    )
+    assert adopted["NVDA"].position.protective_stop is not None
+    assert len(broker.placed_stops) == 1
+    assert "re-placed" in journal_content(tmp_path)
+
+
+def test_orphan_own_stop_is_cancelled(tmp_path):
+    broker = FakeBroker(orders=[broker_order(order_ref=STOP_REF)])
+    adopted, _ = run_checks(tmp_path, broker, protective_stop_enabled=True)
+    assert broker.cancelled == [901]
+    assert adopted["NVDA"].position is None
+    assert "stale protective stop" in journal_content(tmp_path)
+
+
+def test_stop_qty_mismatch_is_cancelled_and_replaced(tmp_path):
+    pos = make_position(qty=2, con_id=222)
+    broker = FakeBroker(
+        orders=[broker_order(order_ref=STOP_REF, qty=1, con_id=222)],
+        positions=[broker_pos(qty=2, con_id=222)],
+    )
+    adopted, _ = run_checks(
+        tmp_path, broker, state=persisted(pos), protective_stop_enabled=True
+    )
+    assert broker.cancelled == [901]
+    assert len(broker.placed_stops) == 1
+    assert adopted["NVDA"].position.protective_stop.qty == 2
+
+
+def test_orphan_stop_cancel_revealing_fills_refuses_startup(tmp_path):
+    broker = FakeBroker(orders=[broker_order(order_ref=STOP_REF)])
+    broker.cancel_result = StopCancelResult(cancelled=True, filled_qty=1, avg_price=2.5)
+    with pytest.raises(SystemExit) as exc_info:
+        run_checks(tmp_path, broker, protective_stop_enabled=True)
+    assert "protective stop reconciliation failed" in str(exc_info.value)
+
+
+def test_disabled_still_cancels_own_stale_stops(tmp_path):
+    broker = FakeBroker(orders=[broker_order(order_ref=STOP_REF)])
+    run_checks(tmp_path, broker)  # PROTECTIVE_STOP off (default)
+    assert broker.cancelled == [901], "toggling the feature off must not strand orders"
+
+
+def test_position_gone_with_persisted_stop_warns_stop_fired_offline(tmp_path):
+    pos = make_position(qty=2, con_id=222)
+    pos.protective_stop = ProtectiveStop(
+        order_id=901, order_ref=STOP_REF, qty=2, stop_price=200.9
+    )
+    adopted, _ = run_checks(
+        tmp_path, FakeBroker(), state=persisted(pos), protective_stop_enabled=True
+    )
+    assert adopted["NVDA"].position is None
+    assert "protective stop likely fired" in journal_content(tmp_path)
 
 
 # -- journal-replay crash recovery ---------------------------------------------------
