@@ -53,7 +53,6 @@ def check(
     trades_today: int,
     candidates: list[SetupCandidate],
     settings: Settings,
-    estimated_premium: float | None = None,
 ) -> RiskVerdict:
     if decision.action in ("wait", "scale_out", "exit"):
         return RiskVerdict(approved=True)
@@ -71,12 +70,8 @@ def check(
 
     violations.extend(_stop_violations(decision, direction))
 
-    # Execution sizes the order down to fit MAX_PREMIUM_USD; the trade is only
-    # vetoed if even a single contract busts the budget.
-    if estimated_premium is not None and estimated_premium * 100 > settings.max_premium_usd:
-        violations.append(
-            f"one contract costs ${estimated_premium * 100:.0f} > MAX_PREMIUM_USD ${settings.max_premium_usd:.0f}"
-        )
+    # MAX_PREMIUM_USD is enforced at execution: size_entry sizes the order down
+    # to fit the budget and skips the entry if even one contract busts it.
 
     return RiskVerdict(approved=not violations, violations=violations)
 

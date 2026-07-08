@@ -78,6 +78,18 @@ def cmd_run() -> None:
     from .runner import LiveRunner, TradingSession
 
     settings, broker = _ib_broker()
+    # The session only manages positions it opened itself (it knows their plan
+    # and stop). An option position already in the account would sit unmanaged
+    # — refuse to start until it is flattened manually.
+    existing = broker.open_option_positions(settings.symbols)
+    if existing:
+        broker.disconnect()
+        sys.exit(
+            "the IB account already holds option positions in configured symbols:\n  "
+            + "\n  ".join(existing)
+            + "\ntajator cannot adopt an existing position (its plan and stop are unknown).\n"
+            "Flatten it manually in IB Gateway, or remove the symbol from SYMBOLS, then restart."
+        )
     try:
         # fail fast on a missing/invalid API key instead of waiting all day
         llm = build_llm(settings.llm_model)

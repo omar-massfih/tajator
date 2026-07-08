@@ -22,6 +22,11 @@ class Fill(BaseModel):
 
 
 class Broker(ABC):
+    def ensure_connected(self) -> bool:
+        """Reconnect if the underlying session dropped. Returns True if a
+        reconnect happened; no-op (False) for in-memory brokers."""
+        return False
+
     @abstractmethod
     def now(self) -> datetime: ...
 

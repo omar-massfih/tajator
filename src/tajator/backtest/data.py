@@ -145,7 +145,8 @@ def ensure_option_bars(ib, contract: SelectedContract, day: date, cache_dir: Pat
     try:
         opt = ib._option(contract)
     except Exception as exc:  # noqa: BLE001 — expired contracts may fail to qualify
-        log.warning("could not qualify %s for %s: %s — falling back to synthetic pricing",
+        log.warning("could not qualify %s for %s: %s — no real price available, "
+                    "the backtest will abort if this contract must be priced",
                     contract.local_name, day, exc)
         return None
     bars: list[Bar] = []
@@ -165,7 +166,8 @@ def ensure_option_bars(ib, contract: SelectedContract, day: date, cache_dir: Pat
             ]
             break
     if not bars:
-        log.warning("no historical option data for %s on %s — falling back to synthetic pricing",
+        log.warning("no historical option data for %s on %s — no real price available, "
+                     "the backtest will abort if this contract must be priced",
                      contract.local_name, day)
         # cache the miss too (empty file) so a rerun doesn't re-hit IB for the same gap
         _write_csv(path, [])

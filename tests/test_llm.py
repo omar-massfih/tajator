@@ -42,6 +42,17 @@ def test_scale_error_falls_back_to_scale_out():
     assert d.action == "scale_out"
 
 
+def test_entry_none_result_falls_back_to_wait():
+    # with_structured_output returns None (not an exception) on a failed parse
+    d = decide_entry(FakeLLM(decision=None), "snapshot")
+    assert d.action == "wait"
+
+
+def test_scale_none_result_falls_back_to_scale_out():
+    d = decide_scale(FakeLLM(decision=None), "snapshot")
+    assert d.action == "scale_out"
+
+
 def test_scale_cannot_answer_enter():
     rogue = Decision(action="enter_call", level_price=1.0, stop_price=0.6, reasoning="x")
     d = decide_scale(FakeLLM(decision=rogue), "snapshot")
@@ -75,6 +86,14 @@ def test_prep_error_falls_back_to_deterministic_levels():
     assert briefing.bias == "neutral"
     assert briefing.watch_levels[0].tradable is False
     assert briefing.watch_levels[0].level == level
+
+
+def test_prep_none_result_falls_back_to_deterministic_levels():
+    level = Level(price=497.0, kind="support", label="prev_day_low")
+    briefing = decide_prep(FakeLLM(decision=None), "SPY", [level], "snapshot")
+    assert isinstance(briefing, MorningBriefing)
+    assert briefing.bias == "neutral"
+    assert briefing.watch_levels[0].tradable is False
 
 
 def test_prep_passes_through_valid_briefing():

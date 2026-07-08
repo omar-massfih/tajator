@@ -93,9 +93,12 @@ def format_snapshot(
 
 
 def _ask(llm, user_text: str) -> Decision:
-    return llm.invoke(
+    decision = llm.invoke(
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_text}]
     )
+    if decision is None:  # with_structured_output returns None on an unparseable answer
+        raise ValueError("LLM returned no parseable structured output")
+    return decision
 
 
 def decide_entry(llm, user_text: str) -> Decision:
@@ -141,9 +144,12 @@ def no_llm_briefing(symbol: str, levels: list[Level], reason: str) -> MorningBri
 
 def decide_prep(llm, symbol: str, levels: list[Level], user_text: str) -> MorningBriefing:
     try:
-        return llm.invoke(
+        briefing = llm.invoke(
             [{"role": "system", "content": PREP_SYSTEM_PROMPT}, {"role": "user", "content": user_text}]
         )
+        if briefing is None:  # with_structured_output returns None on an unparseable answer
+            raise ValueError("LLM returned no parseable structured output")
+        return briefing
     except Exception as exc:  # noqa: BLE001 — any LLM failure must not stop prep
         log.warning("LLM prep briefing failed (%s) — deterministic levels only", exc)
         return no_llm_briefing(symbol, levels, f"LLM unavailable ({exc}); deterministic levels only")

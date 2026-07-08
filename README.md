@@ -87,7 +87,9 @@ but the instant a specific fill can't be priced from real IB data (illiquid
 strike, or an expired contract that fails to qualify) the backtest aborts
 immediately with the offending contract/day named in the error, rather than
 quietly mixing in a guessed price — a partially-synthetic PnL number would be
-worse than no number. It prints an aggregate win-rate/PnL/drawdown summary and
+worse than no number. Fills are priced at the *next* option bar's open (never
+the bar whose close triggered the decision), so there is no look-ahead bias;
+the day's forced flatten uses the last bar's close. It prints an aggregate win-rate/PnL/drawdown summary and
 writes a per-trade ledger + daily equity curve to
 `logs/backtests/<symbol>_<start>_<end>.json`. Known limitation: no market-holiday
 calendar (holidays are just days with no bars, silently skipped).
@@ -99,6 +101,14 @@ calendar (holidays are just days with no bars, silently skipped).
   other refuses to start; paper mode refuses to connect to any live port.
 - Kill switch: `touch KILL` in the repo root blocks all new entries immediately
   (existing positions are still managed and can exit).
+- `run` refuses to start if the IB account already holds option positions in a
+  configured symbol — the agent only manages positions it opened itself (it
+  knows their plan and stop); flatten strays manually first.
+- If the IB connection drops (e.g. the Gateway's nightly restart), the loop
+  reconnects automatically on the next minute tick and journals the outage.
+- A partially filled order that had to be cancelled activates the kill switch
+  automatically: untracked contracts at IB mean no new entries until the
+  operator reconciles and deletes the KILL file.
 - Ctrl-C during `run` offers to flatten any open position.
 - Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`: snapshots, candidates,
   every LLM decision + reasoning, risk vetoes, and fills.

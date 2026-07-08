@@ -77,6 +77,9 @@ class TradingSession:
 
     def _tick_once(self) -> None:
         try:
+            if self.ctx.broker.ensure_connected():
+                self.ctx.journal.write("broker_reconnected", symbol=self.ctx.symbol)
+                print(f"[{self.ctx.symbol}] IB connection was lost — reconnected")
             out = self.tick()
         except Exception as exc:  # noqa: BLE001 — a bad tick must not kill the session
             log.exception("tick failed for %s", self.ctx.symbol)
@@ -135,19 +138,28 @@ class TradingSession:
             print("\nstopped — flat.")
             return
         p = self.position
-        answer = input(
-            f"\nopen position: {p.qty_remaining}x {p.contract.local_name} — flatten now? [y/N] "
-        )
+        try:
+            answer = input(
+                f"\nopen position: {p.qty_remaining}x {p.contract.local_name} — flatten now? [y/N] "
+            )
+        except (KeyboardInterrupt, EOFError):  # second Ctrl-C, or stdin not a TTY
+            answer = ""
         if answer.strip().lower() == "y":
-            bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
-            from .market.indicators import build_snapshot
-
-            snap = build_snapshot(self.ctx.symbol, bars)
-            action = execute_exit(self.ctx.broker, p, snap, "manual_exit", "operator interrupt")
+            try:
+                bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
+                snap = build_snapshot(self.ctx.symbol, bars)
+                action = execute_exit(self.ctx.broker, p, snap, "manual_exit", "operator interrupt")
+            except Exception as exc:  # noqa: BLE001 — a failed flatten must still be reported
+                self.ctx.journal.write(
+                    "error", symbol=self.ctx.symbol, error=f"interrupt flatten failed: {exc}", position=p
+                )
+                print(f"flatten failed ({exc}) — position left open, close it manually via IBKR.")
+                return
             self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
             self.position = None
             print(f"flattened {action.qty}x @ {action.premium:.2f}")
         else:
+            self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
             print("position left open — close it manually via IBKR.")
 
     # -- replay ------------------------------------------------------------------
@@ -245,7 +257,12 @@ class LiveRunner:
                 _sleep_until(prep_at)
             print("=== pre-market prep ===")
             for sess in self.sessions:
-                sess.prep()
+                try:  # prep is advisory — a failure must not keep the session from trading
+                    sess.prep()
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("prep failed for %s", sess.ctx.symbol)
+                    sess.ctx.journal.write("error", symbol=sess.ctx.symbol, error=f"prep failed: {exc}")
+                    print(f"[{sess.ctx.symbol}] prep failed ({exc}) — continuing without briefing")
         while datetime.now(ET) < close_at:
             _sleep_to_next_minute()
             for sess in self.sessions:

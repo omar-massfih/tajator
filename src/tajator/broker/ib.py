@@ -35,15 +35,29 @@ class IBBroker(Broker):
         self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
         self._qualified: dict[str, Option] = {}
         self._delayed = False
+        # subscribe before connect() so connect-time errors are seen too
+        self.ib.errorEvent += self._on_error
 
     # -- lifecycle ---------------------------------------------------------------
 
     def connect(self) -> None:
         s = self.settings
         self.ib.connect(s.ib_host, s.ib_port, clientId=s.ib_client_id, timeout=10)
-        self.ib.reqMarketDataType(s.market_data_type)
-        self.ib.errorEvent += self._on_error
+        self.ib.reqMarketDataType(3 if self._delayed else s.market_data_type)
         log.info("connected to IB %s:%s (mode=%s)", s.ib_host, s.ib_port, s.trading_mode)
+
+    def ensure_connected(self) -> bool:
+        """Reconnect after a dropped session (e.g. the Gateway's nightly restart).
+
+        Called once per tick; a failed attempt raises and is retried on the
+        next tick, so the minute cadence doubles as the retry backoff."""
+        if self.ib.isConnected():
+            return False
+        log.warning("IB connection lost — reconnecting to %s:%s",
+                    self.settings.ib_host, self.settings.ib_port)
+        self.ib.disconnect()  # clear any half-open client state before redialing
+        self.connect()
+        return True
 
     def disconnect(self) -> None:
         if self.ib.isConnected():
@@ -60,6 +74,18 @@ class IBBroker(Broker):
 
     def is_connected(self) -> bool:
         return self.ib.isConnected()
+
+    def open_option_positions(self, symbols: list[str]) -> list[str]:
+        """Existing option positions in the account for the given underlyings,
+        as human-readable strings. Used to refuse startup on unknown positions."""
+        found = []
+        for pos in self.ib.positions():
+            c = pos.contract
+            if c.secType == "OPT" and c.symbol in symbols and pos.position:
+                found.append(
+                    f"{pos.position:+g}x {c.localSymbol or c.symbol} (avg cost {pos.avgCost:.2f})"
+                )
+        return found
 
     def _underlying(self, symbol: str) -> Stock:
         if symbol not in self._stocks:
@@ -178,18 +204,30 @@ class IBBroker(Broker):
             cancel_deadline = time.monotonic() + CANCEL_TIMEOUT_S
             while not trade.isDone() and time.monotonic() < cancel_deadline:
                 self.ib.waitOnUpdate(timeout=1.0)
-            filled = int(trade.orderStatus.filled or 0)
-            raise RuntimeError(
-                f"{side} {qty}x {contract.local_name} not filled within {ORDER_TIMEOUT_S}s — "
-                f"cancelled (status={trade.orderStatus.status}, filled {filled}/{qty}). "
-                "Reconcile the position in IB Gateway before continuing."
-            )
         if trade.orderStatus.status != "Filled":
+            filled = int(trade.orderStatus.filled or 0)
+            halted = ""
+            if filled:
+                # Contracts exist at IB that the session will never track:
+                # block all new entries until the operator reconciles.
+                self._halt_new_entries(
+                    f"partial fill: {side} {filled}/{qty} {contract.local_name}"
+                )
+                halted = " Kill switch activated — no new entries until this file is removed."
             raise RuntimeError(
-                f"{side} {qty}x {contract.local_name} ended {trade.orderStatus.status}"
+                f"{side} {qty}x {contract.local_name} ended "
+                f"{trade.orderStatus.status} (filled {filled}/{qty}). "
+                f"Reconcile the position in IB Gateway before continuing.{halted}"
             )
         return Fill(
             premium=float(trade.orderStatus.avgFillPrice), qty=qty, ts=self.now()
+        )
+
+    def _halt_new_entries(self, reason: str) -> None:
+        log.error("%s — activating kill switch %s", reason, self.settings.kill_switch_file)
+        self.settings.kill_switch_file.write_text(
+            f"{reason} at {self.now().isoformat()}\n"
+            "Reconcile the position in IB Gateway, then delete this file to resume entries.\n"
         )
 
 

@@ -34,10 +34,10 @@ def settings(tmp_path):
 
 
 def run_check(settings, decision=GOOD_ENTRY, *, now=MIDDAY, position=None, trades=0,
-              candidates=(CANDIDATE,), premium=None):
+              candidates=(CANDIDATE,)):
     return check(
         decision, now=now, position=position, trades_today=trades,
-        candidates=list(candidates), settings=settings, estimated_premium=premium,
+        candidates=list(candidates), settings=settings,
     )
 
 
@@ -105,11 +105,6 @@ def test_stop_distance_outside_rule_vetoes(settings):
 def test_missing_stop_vetoes(settings):
     no_stop = Decision(action="enter_call", level_price=499.0, reasoning="x")
     assert not run_check(settings, no_stop).approved
-
-
-def test_single_contract_over_budget_vetoes(settings):
-    assert not run_check(settings, premium=6.0).approved  # $600 > $500
-    assert run_check(settings, premium=4.0).approved
 
 
 def test_entry_blockers_clear_midday(settings):

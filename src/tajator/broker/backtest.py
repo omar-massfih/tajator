@@ -10,12 +10,16 @@ into the same backtest would make its PnL numbers meaningless.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..backtest.data import ET, ensure_option_bars
 from ..models import Bar, SelectedContract
 from .stub import StubBroker
+
+# A fill priced from an option bar further than this from the decision time is
+# treated as no data: better to abort than to fill off a stale/illiquid print.
+MAX_FILL_STALENESS = timedelta(minutes=5)
 
 
 class BacktestBroker(StubBroker):
@@ -41,21 +45,32 @@ class BacktestBroker(StubBroker):
         return self._option_series[key]
 
     @staticmethod
-    def _bar_at_or_before(series: list[Bar], ts: datetime) -> Bar | None:
-        candidate = None
+    def _fill_price(series: list[Bar], ts: datetime) -> float | None:
+        """Price a fill decided at `ts` without look-ahead.
+
+        The decision was made on the close of the bar ending at `ts`, so the
+        order can only fill afterwards: use the NEXT option bar's open. At the
+        end of the series (e.g. the day's forced flatten) fall back to the
+        decision bar's close. Anything further than MAX_FILL_STALENESS from
+        `ts` counts as no data."""
+        prev = None
         for bar in series:
             if bar.ts > ts:
+                if bar.ts - ts <= MAX_FILL_STALENESS:
+                    return bar.open
                 break
-            candidate = bar
-        return candidate
+            prev = bar
+        if prev is not None and ts - prev.ts <= MAX_FILL_STALENESS:
+            return prev.close
+        return None
 
     def get_option_premium(self, contract: SelectedContract) -> float | None:
         series = self._series_for(contract)
-        bar = self._bar_at_or_before(series, self.now()) if series else None
-        if bar is None:
+        price = self._fill_price(series, self.now()) if series else None
+        if price is None:
             day = self.now().astimezone(ET).date()
             raise RuntimeError(
                 f"no historical option data for {contract.local_name} on {day} — "
                 "cannot price this fill from real data, aborting backtest"
             )
-        return round((bar.high + bar.low) / 2, 2)
+        return round(price, 2)
