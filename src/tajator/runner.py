@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time as time_mod
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from .broker.stub import StubBroker
@@ -15,6 +15,7 @@ from .llm.decide import decide_prep, format_prep_snapshot, no_llm_briefing
 from .market.indicators import build_snapshot
 from .market.levels import detect_levels
 from .models import OpenPosition
+from .state_store import PersistedSession, StateStore
 from .trade.execution import execute_exit
 
 ET = ZoneInfo("America/New_York")
@@ -56,21 +57,44 @@ def _next_session_prep(now: datetime) -> datetime:
 
 
 class TradingSession:
-    def __init__(self, ctx: RuntimeContext):
+    def __init__(
+        self,
+        ctx: RuntimeContext,
+        store: StateStore | None = None,
+        restored: PersistedSession | None = None,
+        day: date | None = None,
+    ):
         self.ctx = ctx
         self.graph = build_graph(ctx)
-        self.position: OpenPosition | None = None
-        self.trades_today: int = 0
+        self.store = store
+        self.position: OpenPosition | None = restored.position if restored else None
+        self.trades_today: int = restored.trades_today if restored else 0
+        # restored state is valid for `day` — start_new_day must not wipe it
+        self._day: date | None = day if restored else None
 
-    def start_new_day(self) -> None:
-        """Reset per-day state; an overnight position stays and keeps being managed."""
+    def start_new_day(self, day: date | None = None) -> None:
+        """Reset per-day state once per calendar day; an overnight position
+        stays and keeps being managed. Idempotent within a day so a same-day
+        restart keeps its restored trade count."""
+        day = day or self.ctx.broker.now().date()
+        if self._day == day:
+            return
+        self._day = day
         self.trades_today = 0
+        self._persist()
+
+    def _persist(self) -> None:
+        if self.store is None:  # replay/backtest/prep never persist
+            return
+        day = self._day or self.ctx.broker.now().date()
+        self.store.update(self.ctx.symbol, self.position, self.trades_today, day)
 
     def tick(self) -> AgentState:
         state: AgentState = {"position": self.position, "trades_today": self.trades_today}
         out = self.graph.invoke(state)
         self.position = out.get("position")
         self.trades_today = out.get("trades_today", self.trades_today)
+        self._persist()
         return out
 
     # -- live ------------------------------------------------------------------
@@ -114,7 +138,11 @@ class TradingSession:
             log.warning("prep: no bars yet for %s — skipping", ctx.symbol)
             return
         prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
-        levels = detect_levels(bars, prev_high, prev_low)
+        levels = detect_levels(
+            bars, prev_high, prev_low,
+            min_touch_separation=ctx.settings.double_min_touch_separation_bars,
+            min_pullback_pct=ctx.settings.double_min_pullback_pct,
+        )
         snapshot = build_snapshot(ctx.symbol, bars)
         if ctx.use_llm:
             text = format_prep_snapshot(ctx.symbol, snapshot, levels)
@@ -158,8 +186,16 @@ class TradingSession:
                 return
             self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
             self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
-            self.position = None
-            print(f"flattened {action.qty}x @ {action.premium:.2f}")
+            if p.qty_remaining:
+                self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
+                print(
+                    f"flattened only {action.qty}x @ {action.premium:.2f} — "
+                    f"{p.qty_remaining}x still open, close it manually via IBKR."
+                )
+            else:
+                self.position = None
+                print(f"flattened {action.qty}x @ {action.premium:.2f}")
+            self._persist()
         else:
             self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
             print("position left open — close it manually via IBKR.")
@@ -255,7 +291,7 @@ class LiveRunner:
             _sleep_until(next_prep)
             return  # re-derive the new day's times on the next pass
         for sess in self.sessions:
-            sess.start_new_day()
+            sess.start_new_day(now.date())
         if now < open_at:
             if now < prep_at:
                 print(f"waiting for pre-market prep at {prep_at:%H:%M} ET ...")

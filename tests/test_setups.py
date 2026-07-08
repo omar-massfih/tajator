@@ -39,3 +39,39 @@ def test_rising_fast_into_resistance_fires_put():
 def test_far_from_any_level_no_candidates():
     cands = candidates_for([500.4, 500.5, 500.6, 500.5, 500.5])
     assert cands == []
+
+
+def test_swing_levels_never_become_candidates():
+    # Bare swing points are chart context, not a sanctioned setup — even a
+    # perfect fast approach must not produce a candidate.
+    swing_low = Level(price=499.0, kind="support", label="swing_low")
+    swing_high = Level(price=502.0, kind="resistance", label="swing_high")
+
+    falling = walk(ts(9, 30), [501.0, 500.9, 500.5, 500.1, 499.7, 499.3])
+    snap = build_snapshot("SPY", falling)
+    assert detect_candidates(falling, [swing_low], snap) == []
+
+    rising = walk(ts(9, 30), [500.2, 500.6, 501.0, 501.4, 501.9])
+    snap = build_snapshot("SPY", rising)
+    assert detect_candidates(rising, [swing_high], snap) == []
+
+
+def test_level_a_few_cents_from_the_open_is_vetoed():
+    # Resistance 40 cents (0.08%) above the 500.2 open: no room for a move.
+    near_open = Level(price=500.6, kind="resistance", label="prev_day_high")
+    bars = walk(ts(9, 30), [500.2, 499.5, 499.7, 500.0, 500.3, 500.55])
+    snap = build_snapshot("SPY", bars)
+
+    assert detect_candidates(bars, [near_open], snap) == []
+    # ...and disabling the filter proves the veto was the distance, not the approach
+    fired = detect_candidates(bars, [near_open], snap, min_dist_from_open_pct=0.0)
+    assert any(c.direction == "put" for c in fired)
+
+
+def test_premarket_only_bars_skip_the_open_filter():
+    # No session bars yet: the day's open is unknown, so the distance filter
+    # must be skipped rather than crash or block everything.
+    bars = walk(ts(8, 0), [501.0, 500.9, 500.5, 500.1, 499.7, 499.3])
+    snap = build_snapshot("SPY", bars)
+    cands = detect_candidates(bars, [SUPPORT], snap)
+    assert any(c.direction == "call" for c in cands)

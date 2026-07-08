@@ -42,20 +42,22 @@ def execute_entry(
         )
 
     fill = broker.buy_option(contract, qty)
+    # A reconciled partial fill returns fewer contracts than requested — the
+    # plan must cover what the account actually holds, not what was asked for.
     plan = build_plan(
         direction=direction,
         level_price=decision.level_price,
         stop_price=decision.stop_price,
         entry_equity_price=snapshot.price,
         entry_premium=fill.premium,
-        qty=qty,
+        qty=fill.qty,
     )
     position = OpenPosition(
-        contract=contract, plan=plan, qty_remaining=qty, opened_at=fill.ts
+        contract=contract, plan=plan, qty_remaining=fill.qty, opened_at=fill.ts
     )
     update_extreme(position, snapshot.price)
     action = ExecutedAction(
-        kind="entry", qty=qty, premium=fill.premium, equity_price=snapshot.price,
+        kind="entry", qty=fill.qty, premium=fill.premium, equity_price=snapshot.price,
         ts=fill.ts, reason=decision.reasoning,
     )
     return position, action, None
@@ -66,10 +68,11 @@ def execute_scale_out(
 ) -> ExecutedAction:
     qty = min(current_piece_qty(position), position.qty_remaining)
     fill = broker.sell_option(position.contract, qty)
-    position.pieces_sold += 1
-    position.qty_remaining -= qty
+    if fill.qty == qty:
+        position.pieces_sold += 1  # a partially sold piece is retried on the next signal
+    position.qty_remaining -= fill.qty
     return ExecutedAction(
-        kind="scale_out", qty=qty, premium=fill.premium, equity_price=snapshot.price,
+        kind="scale_out", qty=fill.qty, premium=fill.premium, equity_price=snapshot.price,
         ts=fill.ts, reason=reason,
     )
 
@@ -83,8 +86,8 @@ def execute_exit(
 ) -> ExecutedAction:
     qty = position.qty_remaining
     fill = broker.sell_option(position.contract, qty)
-    position.qty_remaining = 0
+    position.qty_remaining = qty - fill.qty  # nonzero after a partial exit
     return ExecutedAction(
-        kind=kind, qty=qty, premium=fill.premium, equity_price=snapshot.price,
+        kind=kind, qty=fill.qty, premium=fill.premium, equity_price=snapshot.price,
         ts=fill.ts, reason=reason,
     )

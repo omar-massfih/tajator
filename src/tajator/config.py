@@ -9,6 +9,9 @@ from typing import Annotated, Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from .market.levels import DOUBLE_MIN_PULLBACK_PCT, DOUBLE_MIN_TOUCH_SEPARATION_BARS
+from .market.setups import MIN_LEVEL_DIST_FROM_OPEN_PCT
+
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001, 7496}  # 4001 = IB Gateway live, 7496 = TWS live
 PAPER_PORTS = {4002, 7497}  # 4002 = IB Gateway paper, 7497 = TWS paper
@@ -35,12 +38,18 @@ class Settings(BaseSettings):
     stop_buffer_cents: int = 40
     no_new_entries_after: time = time(15, 30)
 
+    # Level quality gates (defaults live next to the algorithms in market/)
+    double_min_touch_separation_bars: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS
+    double_min_pullback_pct: float = DOUBLE_MIN_PULLBACK_PCT
+    min_level_dist_from_open_pct: float = MIN_LEVEL_DIST_FROM_OPEN_PCT
+
     # Telegram trade notifications (optional — leave blank to disable)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
     # Paths
     kill_switch_file: Path = AGENT_DIR / "KILL"
+    state_file: Path = AGENT_DIR / "state.json"  # live session state, adopted on restart
     log_dir: Path = AGENT_DIR / "logs"
     backtest_cache_dir: Path = AGENT_DIR / "data" / "historical"
 

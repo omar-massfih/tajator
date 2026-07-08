@@ -80,3 +80,62 @@ def test_scale_and_exit_bookkeeping():
     assert a.qty == start_qty - position.plan.pieces[0]
     sells = [f for f in broker.fills if f[0] == "SELL"]
     assert sum(f[2].qty for f in sells) == start_qty
+
+
+class PartialFillBroker(StubBroker):
+    """Fills at most `cap` contracts per order, like a reconciled partial fill."""
+
+    def __init__(self, *args, cap=1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cap = cap
+
+    def buy_option(self, contract, qty):
+        return super().buy_option(contract, min(qty, self.cap))
+
+    def sell_option(self, contract, qty):
+        return super().sell_option(contract, min(qty, self.cap))
+
+
+def test_partial_entry_fill_sizes_position_to_what_filled():
+    settings, broker, snap, decision = entry_setup()
+    partial = PartialFillBroker(broker.bars, cap=2)
+    partial.cursor = broker.cursor
+    position, action, skip = execute_entry(partial, settings, decision, "call", snap)
+    assert skip is None
+    assert action.qty == 2
+    assert position.qty_remaining == 2
+    assert position.plan.total_qty == 2, "the plan must cover the actual holding, not the request"
+    assert sum(position.plan.pieces) == 2
+
+
+def test_partial_exit_leaves_remainder_tracked():
+    settings, broker, snap, decision = entry_setup()
+    position, _, _ = execute_entry(broker, settings, decision, "call", snap)
+    start_qty = position.qty_remaining
+
+    partial = PartialFillBroker(broker.bars, cap=1)
+    partial.cursor = broker.cursor
+    a = execute_exit(partial, position, snap, "stop_exit", "stop hit")
+    assert a.qty == 1
+    assert position.qty_remaining == start_qty - 1, "unsold contracts must stay tracked for retry"
+
+
+def test_partial_scale_out_does_not_advance_piece_schedule():
+    from tajator.models import OpenPosition
+    from tajator.trade.position import build_plan
+
+    _, broker, snap, _ = entry_setup()
+    contract = select_contract(CHAIN, "SPY", snap.price, "call", NOW)
+    plan = build_plan(
+        direction="call", level_price=499.0, stop_price=498.6,
+        entry_equity_price=snap.price, entry_premium=1.7, qty=5,
+    )
+    assert plan.pieces[0] == 2, "5 contracts must front-load a 2-lot first piece"
+    position = OpenPosition(contract=contract, plan=plan, qty_remaining=5, opened_at=NOW)
+
+    partial = PartialFillBroker(broker.bars, cap=1)
+    partial.cursor = broker.cursor
+    a = execute_scale_out(partial, position, snap, "ema9 target")
+    assert a.qty == 1
+    assert position.pieces_sold == 0, "a partially sold piece must be retried, not skipped"
+    assert position.qty_remaining == 4

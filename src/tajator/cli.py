@@ -56,10 +56,10 @@ def main() -> None:
         cmd_replay(args)
 
 
-def _ib_broker():
+def _ib_broker(settings=None):
     from .broker.ib import IBBroker
 
-    settings = load_settings()
+    settings = settings or load_settings()
     broker = IBBroker(settings)
     try:
         broker.connect()
@@ -77,20 +77,26 @@ def cmd_run() -> None:
     from .models import MorningBriefing
     from .notify import NullNotifier, TelegramNotifier
     from .runner import LiveRunner, TradingSession
+    from .startup import check_kill_switch, run_startup_checks
+    from .state_store import StateStore
 
-    settings, broker = _ib_broker()
-    # The session only manages positions it opened itself (it knows their plan
-    # and stop). An option position already in the account would sit unmanaged
-    # — refuse to start until it is flattened manually.
-    existing = broker.open_option_positions(settings.symbols)
-    if existing:
+    settings = load_settings()
+    check_kill_switch(settings)
+    settings, broker = _ib_broker(settings)
+    journal = Journal(settings.log_dir)
+    notifier = (
+        TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        if settings.telegram_bot_token and settings.telegram_chat_id
+        else NullNotifier()
+    )
+    store = StateStore(settings.state_file)
+    try:
+        # Refuse on resting orders or positions that persisted state cannot
+        # explain; adopt positions from a previous run that match exactly.
+        adopted = run_startup_checks(settings, broker, store, journal, notifier)
+    except SystemExit:
         broker.disconnect()
-        sys.exit(
-            "the IB account already holds option positions in configured symbols:\n  "
-            + "\n  ".join(existing)
-            + "\ntajator cannot adopt an existing position (its plan and stop are unknown).\n"
-            "Flatten it manually in IB Gateway, or remove the symbol from SYMBOLS, then restart."
-        )
+        raise
     try:
         # fail fast on a missing/invalid API key instead of waiting all day
         llm = build_llm(settings.llm_model)
@@ -98,18 +104,16 @@ def cmd_run() -> None:
     except Exception as exc:  # noqa: BLE001
         broker.disconnect()
         sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
-    journal = Journal(settings.log_dir)
-    notifier = (
-        TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-        if settings.telegram_bot_token and settings.telegram_chat_id
-        else NullNotifier()
-    )
+    today = broker.now().date()
     sessions = [
         TradingSession(
             RuntimeContext(
                 settings=settings, broker=broker, journal=journal, symbol=symbol,
                 notifier=notifier, _llm=llm, _prep_llm=prep_llm,
-            )
+            ),
+            store=store,
+            restored=adopted.get(symbol),
+            day=today,
         )
         for symbol in settings.symbols
     ]

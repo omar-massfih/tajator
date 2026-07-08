@@ -21,8 +21,8 @@ WAYPOINTS = [
     ("08:00", 500.00),
     ("08:20", 500.80),  # premarket high
     ("08:50", 499.20),  # premarket low
-    ("09:29", 499.90),
-    ("09:30", 500.00),
+    ("09:29", 500.90),
+    ("09:30", 501.00),  # open ~0.34% above the premarket low — a tradable distance
     ("10:00", 502.00),  # first high (HOD)
     ("10:20", 500.80),
     ("10:40", 501.95),  # double top vs 10:00 high

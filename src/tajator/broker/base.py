@@ -17,8 +17,38 @@ class ChainParams(BaseModel):
 
 class Fill(BaseModel):
     premium: float  # per-contract option price
-    qty: int
+    qty: int  # contracts actually filled — may be less than requested
     ts: datetime
+
+
+class BrokerOptionPosition(BaseModel):
+    """An option position as reported by the broker account."""
+
+    symbol: str
+    expiry: str  # YYYYMMDD
+    strike: float
+    right: str  # "C" | "P"
+    con_id: int
+    local_symbol: str
+    qty: int
+    avg_cost: float
+
+
+class OrderFailed(RuntimeError):
+    """A placed order ended in a terminal non-Filled state.
+
+    `filled` is the reconciled contract count (0 when nothing executed);
+    `suspect` is True when that count could not be confirmed against both
+    execution reports and the account's position."""
+
+    def __init__(
+        self, message: str, *, side: str, requested: int, filled: int, suspect: bool
+    ):
+        super().__init__(message)
+        self.side = side
+        self.requested = requested
+        self.filled = filled
+        self.suspect = suspect
 
 
 class Broker(ABC):

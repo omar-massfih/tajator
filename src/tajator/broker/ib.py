@@ -17,7 +17,7 @@ from ib_async import IB, MarketOrder, Option, Stock
 
 from ..config import Settings
 from ..models import Bar, SelectedContract
-from .base import Broker, ChainParams, Fill
+from .base import Broker, BrokerOptionPosition, ChainParams, Fill, OrderFailed
 
 ET = ZoneInfo("America/New_York")
 log = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 NO_SUBSCRIPTION_CODES = {354, 10167, 10197}
 ORDER_TIMEOUT_S = 30
 CANCEL_TIMEOUT_S = 10
+FILL_GRACE_S = 5  # after a cancel, wait this long for late execution reports
 
 
 class IBBroker(Broker):
@@ -75,16 +76,58 @@ class IBBroker(Broker):
     def is_connected(self) -> bool:
         return self.ib.isConnected()
 
-    def open_option_positions(self, symbols: list[str]) -> list[str]:
-        """Existing option positions in the account for the given underlyings,
-        as human-readable strings. Used to refuse startup on unknown positions."""
+    def option_positions(self, symbols: list[str]) -> list[BrokerOptionPosition]:
+        """Existing option positions in the account for the given underlyings.
+        Startup reconciles these against persisted state before trading."""
         found = []
         for pos in self.ib.positions():
             c = pos.contract
             if c.secType == "OPT" and c.symbol in symbols and pos.position:
                 found.append(
-                    f"{pos.position:+g}x {c.localSymbol or c.symbol} (avg cost {pos.avgCost:.2f})"
+                    BrokerOptionPosition(
+                        symbol=c.symbol,
+                        expiry=getattr(c, "lastTradeDateOrContractMonth", "") or "",
+                        strike=float(getattr(c, "strike", 0) or 0),
+                        right=(getattr(c, "right", "") or "?")[:1],
+                        con_id=int(getattr(c, "conId", 0) or 0),
+                        local_symbol=c.localSymbol or c.symbol,
+                        qty=int(pos.position),
+                        avg_cost=float(pos.avgCost or 0),
+                    )
                 )
+        return found
+
+    def open_option_positions(self, symbols: list[str]) -> list[str]:
+        """Same, as human-readable strings for operator messages."""
+        return [
+            f"{p.qty:+g}x {p.local_symbol} (avg cost {p.avg_cost:.2f})"
+            for p in self.option_positions(symbols)
+        ]
+
+    def open_option_orders(self, symbols: list[str]) -> list[str]:
+        """Resting orders at IB for the given underlyings, as human-readable
+        strings. reqAllOpenOrders sees orders from other client IDs and manual
+        TWS orders too — e.g. one left working by a crashed session."""
+        self.ib.reqAllOpenOrders()
+        found = []
+        for trade in self.ib.openTrades():
+            c = trade.contract
+            if c.secType == "OPT" and c.symbol in symbols:
+                o = trade.order
+                found.append(
+                    f"{o.action} {o.totalQuantity:g}x {c.localSymbol or c.symbol} "
+                    f"({o.orderType}, status {trade.orderStatus.status})"
+                )
+        return found
+
+    def other_positions_summary(self, symbols: list[str]) -> list[str]:
+        """Nonzero positions the startup guard does not gate on — stock, or
+        options on unconfigured underlyings — reported so nothing sits unseen."""
+        found = []
+        for pos in self.ib.positions():
+            c = pos.contract
+            if pos.position and not (c.secType == "OPT" and c.symbol in symbols):
+                found.append(f"{pos.position:+g}x {c.secType} {c.localSymbol or c.symbol}")
         return found
 
     def _underlying(self, symbol: str) -> Stock:
@@ -168,7 +211,10 @@ class IBBroker(Broker):
             if not qualified:
                 raise RuntimeError(f"could not qualify option {key}")
             self._qualified[key] = opt
-        return self._qualified[key]
+        opt = self._qualified[key]
+        if contract.con_id is None and opt.conId:
+            contract.con_id = opt.conId  # persisted state matches on conId
+        return opt
 
     def get_option_premium(self, contract: SelectedContract) -> float | None:
         opt = self._option(contract)
@@ -193,6 +239,7 @@ class IBBroker(Broker):
 
     def _place(self, contract: SelectedContract, side: str, qty: int) -> Fill:
         opt = self._option(contract)
+        qty_before = self._snapshot_position(opt)
         trade = self.ib.placeOrder(opt, MarketOrder(side, qty))
         deadline = time.monotonic() + ORDER_TIMEOUT_S
         while not trade.isDone() and time.monotonic() < deadline:
@@ -204,24 +251,94 @@ class IBBroker(Broker):
             cancel_deadline = time.monotonic() + CANCEL_TIMEOUT_S
             while not trade.isDone() and time.monotonic() < cancel_deadline:
                 self.ib.waitOnUpdate(timeout=1.0)
-        if trade.orderStatus.status != "Filled":
-            filled = int(trade.orderStatus.filled or 0)
-            halted = ""
-            if filled:
-                # Contracts exist at IB that the session will never track:
-                # block all new entries until the operator reconciles.
-                self._halt_new_entries(
-                    f"partial fill: {side} {filled}/{qty} {contract.local_name}"
-                )
-                halted = " Kill switch activated — no new entries until this file is removed."
-            raise RuntimeError(
-                f"{side} {qty}x {contract.local_name} ended "
-                f"{trade.orderStatus.status} (filled {filled}/{qty}). "
-                f"Reconcile the position in IB Gateway before continuing.{halted}"
+        if trade.orderStatus.status == "Filled":
+            return Fill(
+                premium=float(trade.orderStatus.avgFillPrice), qty=qty, ts=self.now()
             )
-        return Fill(
-            premium=float(trade.orderStatus.avgFillPrice), qty=qty, ts=self.now()
+        return self._resolve_unfilled(trade, opt, contract, side, qty, qty_before)
+
+    def _resolve_unfilled(
+        self, trade, opt: Option, contract: SelectedContract, side: str, qty: int,
+        qty_before: int | None,
+    ) -> Fill:
+        """Terminal non-Filled order. orderStatus.filled alone cannot be trusted:
+        a cancel can race the fill, so IB reports Cancelled (filled 0) for an
+        order that actually executed. Reconcile against execution reports and
+        the account position, adopt whatever really filled, and halt new
+        entries — any non-Filled outcome means the account needs a look."""
+        grace = time.monotonic() + FILL_GRACE_S  # let late execution reports land
+        while time.monotonic() < grace:
+            self.ib.waitOnUpdate(timeout=1.0)
+        status = trade.orderStatus.status
+        reported = int(trade.orderStatus.filled or 0)
+        from_fills = int(sum(f.execution.shares for f in trade.fills))
+        delta = self._position_delta(opt, side, qty_before)
+        confirmed = delta is not None and delta == from_fills
+        filled = from_fills if confirmed else max(reported, from_fills, delta or 0)
+        label = f"{side} {qty}x {contract.local_name} ended {status} (filled {filled}/{qty})"
+
+        premium = self._fill_premium(trade, filled)
+        if filled and premium is not None:
+            self._halt_new_entries(
+                f"{label} — the {filled} filled contract(s) WERE adopted into the "
+                "session and will be managed normally"
+            )
+            return Fill(premium=premium, qty=filled, ts=self.now())
+        if filled == 0 and confirmed:
+            if side == "BUY":
+                self._halt_new_entries(f"{label} — nothing filled, but entry orders are failing")
+            raise OrderFailed(
+                f"{label}. No contracts filled.",
+                side=side, requested=qty, filled=0, suspect=False,
+            )
+        self._halt_new_entries(f"{label} — TRUE FILL COUNT UNCONFIRMED")
+        raise OrderFailed(
+            f"{label}. True fill count unconfirmed — reconcile the position in IB Gateway.",
+            side=side, requested=qty, filled=filled, suspect=True,
         )
+
+    def _snapshot_position(self, opt: Option) -> int | None:
+        """Account position for the contract before an order, or None if unreadable."""
+        if not opt.conId:
+            return None
+        try:
+            return self._position_qty(opt.conId)
+        except Exception:  # noqa: BLE001 — a failed snapshot only weakens reconciliation
+            log.exception("could not snapshot position for conId %s", opt.conId)
+            return None
+
+    def _position_qty(self, con_id: int) -> int:
+        for pos in self.ib.positions():
+            if pos.contract.conId == con_id:
+                return int(pos.position or 0)
+        return 0
+
+    def _position_delta(self, opt: Option, side: str, qty_before: int | None) -> int | None:
+        """Contracts gained (BUY) or shed (SELL) per the account's position since
+        the pre-order snapshot, or None when the position could not be read."""
+        if qty_before is None or not opt.conId:
+            return None
+        try:
+            self.ib.reqPositions()  # refresh — the cancel may have raced the fill
+            after = self._position_qty(opt.conId)
+        except Exception:  # noqa: BLE001 — fall back to execution reports only
+            log.exception("could not refresh positions to reconcile conId %s", opt.conId)
+            return None
+        sign = 1 if side == "BUY" else -1
+        return max(0, sign * (after - qty_before))
+
+    @staticmethod
+    def _fill_premium(trade, filled: int) -> float | None:
+        """Average per-contract price of what filled, from execution reports
+        first (survives the cancel/fill race), else the order's avgFillPrice."""
+        if filled <= 0:
+            return None
+        shares = sum(f.execution.shares for f in trade.fills)
+        if shares:
+            total = sum(f.execution.shares * f.execution.price for f in trade.fills)
+            return float(total / shares)
+        avg = trade.orderStatus.avgFillPrice
+        return float(avg) if avg else None
 
     def _halt_new_entries(self, reason: str) -> None:
         log.error("%s — activating kill switch %s", reason, self.settings.kill_switch_file)

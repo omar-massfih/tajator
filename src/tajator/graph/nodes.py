@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..broker.base import Broker
+from ..broker.base import Broker, OrderFailed
 from ..config import Settings
 from ..journal import Journal
 from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
@@ -62,7 +62,11 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         if not bars:
             raise RuntimeError("broker returned no bars (data farm down or market closed)")
         snapshot = build_snapshot(ctx.symbol, bars)
-        levels = detect_levels(bars, state.get("prev_day_high"), state.get("prev_day_low"))
+        levels = detect_levels(
+            bars, state.get("prev_day_high"), state.get("prev_day_low"),
+            min_touch_separation=settings.double_min_touch_separation_bars,
+            min_pullback_pct=settings.double_min_pullback_pct,
+        )
         return {"snapshot": snapshot, "levels": levels}
 
     # ----- position-open branch ---------------------------------------------
@@ -111,12 +115,16 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         action = execute_exit(ctx.broker, position, snapshot, kind, reason)
         ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
         ctx.notifier.notify_fill(ctx.symbol, action, position)
-        return {"actions": [action], "position": None}
+        # a partial exit leaves contracts to retry on the next tick
+        return {"actions": [action], "position": position if position.qty_remaining else None}
 
     # ----- flat branch --------------------------------------------------------
 
     def detect_setups(state: AgentState) -> dict:
-        candidates = detect_candidates(state["bars"], state["levels"], state["snapshot"])
+        candidates = detect_candidates(
+            state["bars"], state["levels"], state["snapshot"],
+            min_dist_from_open_pct=settings.min_level_dist_from_open_pct,
+        )
         if not candidates:
             return {"candidates": candidates}
         ctx.journal.write(
@@ -179,7 +187,21 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def do_entry(state: AgentState) -> dict:
         decision, snapshot = state["decision"], state["snapshot"]
         direction = "call" if decision.action == "enter_call" else "put"
-        position, action, skip = execute_entry(ctx.broker, settings, decision, direction, snapshot)
+        try:
+            position, action, skip = execute_entry(ctx.broker, settings, decision, direction, snapshot)
+        except OrderFailed as exc:
+            # An order reached IB, so the attempt consumes a trade — otherwise a
+            # setup that keeps firing would loop a new order every minute (this
+            # must happen inside the node: state changes are lost if the
+            # exception escapes to the runner). Only OrderFailed is caught;
+            # data/qualify/premium errors placed no order and keep retrying.
+            ctx.journal.write(
+                "entry_order_failed", ts=snapshot.ts, symbol=ctx.symbol,
+                error=str(exc), decision=decision,
+            )
+            ctx.notifier.notify_status(f"{ctx.symbol} entry order FAILED: {exc}")
+            print(f"[{ctx.symbol}] entry order failed ({exc})")
+            return {"skip_reason": str(exc), "trades_today": state.get("trades_today", 0) + 1}
         if skip is not None:
             ctx.journal.write("entry_skipped", ts=snapshot.ts, symbol=ctx.symbol, reason=skip, decision=decision)
             return {"skip_reason": skip}

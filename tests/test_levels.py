@@ -27,7 +27,8 @@ def test_premarket_levels_detected():
 
 
 def test_double_top_from_clustered_swings():
-    # Rally to ~502 twice with a pullback in between, then sell off.
+    # Rally to ~502 twice with a pullback in between, then sell off:
+    # touches ~16 bars apart with a ~0.24% retrace — a qualified double.
     path = (
         [500 + 0.2 * i for i in range(11)]  # 500 -> 502 first high
         + [502 - 0.15 * i for i in range(1, 9)]  # pull back to ~500.8
@@ -40,6 +41,62 @@ def test_double_top_from_clustered_swings():
     assert double_tops, f"no double top in {levels}"
     assert abs(double_tops[0].price - 502.0) < 0.5
     assert double_tops[0].kind == "resistance"
+
+
+def test_two_close_touches_stay_swing_high():
+    # Two ~502 tops only ~5 bars apart with a real dip between: too close in
+    # time to be "a clear earlier top being retested" — stays a swing_high.
+    path = (
+        [500.0, 500.5, 501.0, 501.5, 502.0]  # first top
+        + [501.0, 500.8, 501.0, 501.5, 502.0]  # quick dip, immediate retest
+        + [501.5, 501.0, 500.5, 500.0, 499.5, 499.0, 498.5]
+    )
+    bars = walk(ts(9, 30), path)
+    labels = {l.label for l in detect_levels(bars)}
+    assert "double_top" not in labels
+    assert "swing_high" in labels
+
+
+def test_shallow_pullback_stays_swing_high():
+    # Tops 11+ bars apart but the sag between them is only ~$0.40 (0.08%):
+    # no real retrace, so the "double" is just a flat ceiling — swing_high.
+    path = (
+        [500.0, 500.5, 501.0, 501.5, 502.0]
+        + [501.8, 501.7] + [501.6] * 6 + [501.7, 501.8, 502.0]
+        + [501.5, 501.0, 500.5, 500.0, 499.5]
+    )
+    bars = walk(ts(9, 30), path)
+    labels = {l.label for l in detect_levels(bars)}
+    assert "double_top" not in labels
+    assert "swing_high" in labels
+
+
+def double_bottom_path() -> list[float]:
+    return (
+        [502 - 0.2 * i for i in range(11)]  # 502 -> 500 first low
+        + [500 + 0.15 * i for i in range(1, 9)]  # bounce to ~501.2
+        + [501.2 - 0.15 * i for i in range(1, 9)]  # back down to ~500 second low
+        + [500 + 0.2 * i for i in range(1, 11)]  # rally to ~502
+    )
+
+
+def test_qualified_double_bottom():
+    bars = walk(ts(9, 30), double_bottom_path())
+    levels = detect_levels(bars)
+    doubles = [l for l in levels if l.label == "double_bottom"]
+    assert doubles, f"no double bottom in {levels}"
+    assert abs(doubles[0].price - 500.0) < 0.5
+    assert doubles[0].kind == "support"
+
+
+def test_pullback_threshold_is_threaded_through():
+    # The same qualified double bottom demotes to swing_low under a stricter
+    # pullback requirement — proves the setting reaches the qualifier.
+    bars = walk(ts(9, 30), double_bottom_path())
+    levels = detect_levels(bars, min_pullback_pct=0.01)
+    labels = {l.label for l in levels}
+    assert "double_bottom" not in labels
+    assert "swing_low" in labels
 
 
 def test_dedupe_prefers_stronger_label():
