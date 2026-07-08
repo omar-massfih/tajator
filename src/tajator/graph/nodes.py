@@ -18,6 +18,7 @@ from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
 from ..models import Decision, MorningBriefing
+from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
 from ..trade import position as pos
 from ..trade.execution import execute_entry, execute_exit, execute_scale_out
@@ -31,6 +32,7 @@ class RuntimeContext:
     journal: Journal
     symbol: str
     use_llm: bool = True
+    notifier: Notifier = field(default_factory=NullNotifier)
     _llm: Any = field(default=None, repr=False)
     _prep_llm: Any = field(default=None, repr=False)
 
@@ -95,6 +97,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         reason = state["manage_action"].reason
         action = execute_scale_out(ctx.broker, position, snapshot, reason)
         ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+        ctx.notifier.notify_fill(ctx.symbol, action, position)
         closed = position.qty_remaining == 0
         return {"actions": [action], "position": None if closed else position}
 
@@ -107,6 +110,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             kind, reason = "manual_exit", state["decision"].reasoning
         action = execute_exit(ctx.broker, position, snapshot, kind, reason)
         ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+        ctx.notifier.notify_fill(ctx.symbol, action, position)
         return {"actions": [action], "position": None}
 
     # ----- flat branch --------------------------------------------------------
@@ -180,6 +184,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             ctx.journal.write("entry_skipped", ts=snapshot.ts, symbol=ctx.symbol, reason=skip, decision=decision)
             return {"skip_reason": skip}
         ctx.journal.write("fill", ts=snapshot.ts, symbol=ctx.symbol, action=action, position=position)
+        ctx.notifier.notify_fill(ctx.symbol, action, position)
         return {
             "actions": [action],
             "position": position,

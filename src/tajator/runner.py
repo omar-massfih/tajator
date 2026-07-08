@@ -79,6 +79,7 @@ class TradingSession:
         try:
             if self.ctx.broker.ensure_connected():
                 self.ctx.journal.write("broker_reconnected", symbol=self.ctx.symbol)
+                self.ctx.notifier.notify_status(f"{self.ctx.symbol} — IB connection was lost, reconnected")
                 print(f"[{self.ctx.symbol}] IB connection was lost — reconnected")
             out = self.tick()
         except Exception as exc:  # noqa: BLE001 — a bad tick must not kill the session
@@ -156,6 +157,7 @@ class TradingSession:
                 print(f"flatten failed ({exc}) — position left open, close it manually via IBKR.")
                 return
             self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
+            self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
             self.position = None
             print(f"flattened {action.qty}x @ {action.premium:.2f}")
         else:
@@ -232,12 +234,15 @@ class LiveRunner:
         if mode == "LIVE":
             banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
         print(banner)
+        notifier = self.sessions[0].ctx.notifier
+        notifier.notify_status(f"tajator started | {symbols} | {mode}")
         try:
             while True:
                 self._run_one_day()
         except KeyboardInterrupt:
             for sess in self.sessions:
                 sess._on_interrupt()
+            notifier.notify_status(f"tajator stopped | {symbols} | {mode}")
 
     def _run_one_day(self) -> None:
         """Wait for the next session if closed; otherwise prep, tick until the close."""

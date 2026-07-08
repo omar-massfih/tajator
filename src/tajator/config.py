@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     stop_buffer_cents: int = 40
     no_new_entries_after: time = time(15, 30)
 
+    # Telegram trade notifications (optional — leave blank to disable)
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Paths
     kill_switch_file: Path = AGENT_DIR / "KILL"
     log_dir: Path = AGENT_DIR / "logs"

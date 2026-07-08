@@ -75,6 +75,7 @@ def cmd_run() -> None:
     from .graph.nodes import RuntimeContext
     from .llm.decide import build_llm
     from .models import MorningBriefing
+    from .notify import NullNotifier, TelegramNotifier
     from .runner import LiveRunner, TradingSession
 
     settings, broker = _ib_broker()
@@ -98,11 +99,16 @@ def cmd_run() -> None:
         broker.disconnect()
         sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
     journal = Journal(settings.log_dir)
+    notifier = (
+        TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        if settings.telegram_bot_token and settings.telegram_chat_id
+        else NullNotifier()
+    )
     sessions = [
         TradingSession(
             RuntimeContext(
                 settings=settings, broker=broker, journal=journal, symbol=symbol,
-                _llm=llm, _prep_llm=prep_llm,
+                notifier=notifier, _llm=llm, _prep_llm=prep_llm,
             )
         )
         for symbol in settings.symbols

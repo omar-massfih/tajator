@@ -57,6 +57,35 @@ def test_full_day_enter_scale_runner(session, capsys):
     assert '"fill"' in content
 
 
+def test_replay_notifies_every_fill_but_never_talks_to_telegram(tmp_path):
+    """The notifier seam must fire on every fill during replay (so a real Notifier
+    stays in sync with the journal) while the default NullNotifier — what replay
+    actually gets in production — proves replay never sends real Telegram messages."""
+
+    class RecordingNotifier:
+        def __init__(self):
+            self.fills = []
+
+        def notify_fill(self, symbol, action, position):
+            self.fills.append((symbol, action.kind, action.qty))
+
+        def notify_status(self, text):
+            pass
+
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
+    broker = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
+    notifier = RecordingNotifier()
+    ctx = RuntimeContext(
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY",
+        use_llm=False, notifier=notifier,
+    )
+    sess = TradingSession(ctx)
+    sess.run_replay(broker)
+
+    assert len(notifier.fills) == len(broker.fills)
+    assert notifier.fills[0][1] == "entry"
+
+
 def test_kill_switch_blocks_all_entries(session):
     sess, broker, tmp_path = session
     sess.ctx.settings.kill_switch_file.write_text("stop")
