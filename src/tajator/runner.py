@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time as time_mod
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from .broker.stub import StubBroker
@@ -21,6 +22,7 @@ from .trade.execution import execute_exit
 ET = ZoneInfo("America/New_York")
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
+FLATTEN_AT = time(15, 55)  # stop tick-managing and force-flatten before the illiquid closing minutes
 PREP_TIME = time(9, 0)  # 30 min before RTH_OPEN
 
 log = logging.getLogger(__name__)
@@ -162,6 +164,46 @@ class TradingSession:
             print(f"  {w.level.price:.2f}  {w.level.kind:<10} ({w.level.label})  [{tag}{direction}] {w.note}")
         print(f"  bias: {briefing.bias}  |  {briefing.summary}")
 
+    def _flatten_position(self, kind: Literal["manual_exit"], reason: str) -> bool:
+        """Force-close self.position via execute_exit; journals, notifies, persists.
+
+        Returns True once the position is fully closed. On a failed cancel/sell
+        (real IB errors only — StubBroker never raises), the position is left
+        untouched so it stays managed on the next tick / next day."""
+        p = self.position
+        if p is None:
+            return True
+        try:
+            bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
+            snap = build_snapshot(self.ctx.symbol, bars)
+            actions = execute_exit(self.ctx.broker, self.ctx.settings, p, snap, kind, reason)
+        except Exception as exc:  # noqa: BLE001 — a failed flatten must still be reported
+            self.ctx.journal.write(
+                "error", symbol=self.ctx.symbol, error=f"flatten failed: {exc}", position=p
+            )
+            self.ctx.notifier.notify_status(
+                f"{self.ctx.symbol}: flatten FAILED ({exc}) — "
+                f"{p.qty_remaining}x still open, close manually via IBKR"
+            )
+            print(f"[{self.ctx.symbol}] flatten failed ({exc}) — position left open, close it manually via IBKR.")
+            return False
+        for action in actions:
+            self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
+            self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
+        sold = sum(a.qty for a in actions)
+        avg = sum(a.qty * a.premium for a in actions) / sold if sold else 0.0
+        if p.qty_remaining:
+            self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
+            print(
+                f"[{self.ctx.symbol}] flattened only {sold}x @ {avg:.2f} — "
+                f"{p.qty_remaining}x still open, close it manually via IBKR."
+            )
+        else:
+            self.position = None
+            print(f"[{self.ctx.symbol}] flattened {sold}x @ {avg:.2f}")
+        self._persist()
+        return p.qty_remaining == 0
+
     def _on_interrupt(self) -> None:
         if self.position is None:
             print("\nstopped — flat.")
@@ -174,33 +216,7 @@ class TradingSession:
         except (KeyboardInterrupt, EOFError):  # second Ctrl-C, or stdin not a TTY
             answer = ""
         if answer.strip().lower() == "y":
-            try:
-                bars = self.ctx.broker.get_bars(self.ctx.symbol, lookback_minutes=5)
-                snap = build_snapshot(self.ctx.symbol, bars)
-                actions = execute_exit(
-                    self.ctx.broker, self.ctx.settings, p, snap, "manual_exit", "operator interrupt"
-                )
-            except Exception as exc:  # noqa: BLE001 — a failed flatten must still be reported
-                self.ctx.journal.write(
-                    "error", symbol=self.ctx.symbol, error=f"interrupt flatten failed: {exc}", position=p
-                )
-                print(f"flatten failed ({exc}) — position left open, close it manually via IBKR.")
-                return
-            for action in actions:
-                self.ctx.journal.write("fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=p)
-                self.ctx.notifier.notify_fill(self.ctx.symbol, action, p)
-            sold = sum(a.qty for a in actions)
-            avg = sum(a.qty * a.premium for a in actions) / sold if sold else 0.0
-            if p.qty_remaining:
-                self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
-                print(
-                    f"flattened only {sold}x @ {avg:.2f} — "
-                    f"{p.qty_remaining}x still open, close it manually via IBKR."
-                )
-            else:
-                self.position = None
-                print(f"flattened {sold}x @ {avg:.2f}")
-            self._persist()
+            self._flatten_position("manual_exit", "operator interrupt")
         else:
             self.ctx.journal.write("interrupt_open_position", symbol=self.ctx.symbol, position=p)
             if p.protective_stop is not None:
@@ -298,6 +314,7 @@ class LiveRunner:
         now = datetime.now(ET)
         prep_at, open_at = _todays_prep_and_open(now)
         close_at = datetime.combine(now.date(), RTH_CLOSE, tzinfo=ET)
+        flatten_at = datetime.combine(now.date(), FLATTEN_AT, tzinfo=ET)
         if now.weekday() >= 5 or now >= close_at:
             next_prep = _next_session_prep(now)
             print(f"market closed — sleeping until prep {next_prep:%a %Y-%m-%d %H:%M} ET")
@@ -317,17 +334,24 @@ class LiveRunner:
                     log.exception("prep failed for %s", sess.ctx.symbol)
                     sess.ctx.journal.write("error", symbol=sess.ctx.symbol, error=f"prep failed: {exc}")
                     print(f"[{sess.ctx.symbol}] prep failed ({exc}) — continuing without briefing")
-        while datetime.now(ET) < close_at:
+        while datetime.now(ET) < flatten_at:
             _sleep_to_next_minute()
             for sess in self.sessions:
                 sess._tick_once()
         self._on_session_close()
 
     def _on_session_close(self) -> None:
+        """Force-flatten any position still open at the FLATTEN_AT cutoff — this
+        strategy has no multi-day thesis, so nothing should carry overnight."""
         for sess in self.sessions:
             if sess.position is None:
                 continue
             p = sess.position
+            flattened = sess._flatten_position(
+                "manual_exit", f"end of day ({FLATTEN_AT:%H:%M} ET) — forced flat"
+            )
+            if flattened:
+                continue
             stop_note = (
                 f" (protective stop {p.protective_stop.order_id} stays working GTC "
                 f"at {p.protective_stop.stop_price})"
@@ -335,12 +359,12 @@ class LiveRunner:
                 else ""
             )
             log.warning(
-                "%s: session closed with open position %dx %s%s — it will be managed "
-                "again tomorrow; close it manually via IBKR if that is not intended",
+                "%s: EOD flatten failed, session closed with open position %dx %s%s — it will be "
+                "managed again tomorrow; close it manually via IBKR if that is not intended",
                 sess.ctx.symbol, p.qty_remaining, p.contract.local_name, stop_note,
             )
             print(
-                f"!!! {sess.ctx.symbol}: market closed with open position "
+                f"!!! {sess.ctx.symbol}: EOD flatten failed, market closed with open position "
                 f"{p.qty_remaining}x {p.contract.local_name}{stop_note} — close manually "
                 "via IBKR or leave it to be managed tomorrow"
             )

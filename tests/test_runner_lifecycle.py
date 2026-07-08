@@ -8,10 +8,25 @@ from tajator.broker.stub import StubBroker
 from tajator.config import Settings
 from tajator.graph.nodes import RuntimeContext
 from tajator.journal import Journal
-from tajator.runner import TradingSession, _next_session_prep
+from tajator.models import OpenPosition, PositionPlan, SelectedContract
+from tajator.runner import LiveRunner, TradingSession, _next_session_prep
 
 ET = ZoneInfo("America/New_York")
 CSV = Path(__file__).parent / "data" / "spy_sample_day.csv"
+
+
+class RecordingNotifier:
+    """Captures notifier calls so a test can assert what would have gone to Telegram."""
+
+    def __init__(self):
+        self.fills = []
+        self.statuses = []
+
+    def notify_fill(self, symbol, action, position):
+        self.fills.append((symbol, action.kind, action.qty))
+
+    def notify_status(self, text):
+        self.statuses.append(text)
 
 
 def make_session(tmp_path, broker):
@@ -20,6 +35,24 @@ def make_session(tmp_path, broker):
         settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
     )
     return TradingSession(ctx)
+
+
+def make_session_with_notifier(tmp_path, broker, notifier):
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
+    ctx = RuntimeContext(
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False,
+        notifier=notifier,
+    )
+    return TradingSession(ctx)
+
+
+def make_position(broker, qty=2):
+    contract = SelectedContract(symbol="SPY", expiry="20260710", strike=500.0, right="C")
+    plan = PositionPlan(
+        direction="call", level_price=500.0, stop_price=498.0, entry_equity_price=500.0,
+        entry_premium=2.0, total_qty=qty, pieces=[qty], target_refs=["runner"],
+    )
+    return OpenPosition(contract=contract, plan=plan, qty_remaining=qty, opened_at=broker.now())
 
 
 def test_start_new_day_resets_trade_counter(tmp_path):
@@ -66,3 +99,42 @@ def test_position_left_open_is_flattened_at_end_of_replay(tmp_path):
 
     content = "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
     assert "end of replay day" in content
+
+
+def test_on_session_close_flattens_open_position_and_notifies(tmp_path):
+    """The live EOD cutoff must actually close a carried-over position (not just
+    warn) and fire notify_fill — this is the seam Telegram exit messages go through."""
+    broker = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
+    notifier = RecordingNotifier()
+    sess = make_session_with_notifier(tmp_path, broker, notifier)
+    sess.position = make_position(broker)
+
+    LiveRunner([sess])._on_session_close()
+
+    assert sess.position is None, "EOD flatten must close the position, not just warn"
+    assert notifier.fills, "notify_fill should fire for the forced EOD exit"
+    assert notifier.fills[-1][1] == "manual_exit"
+    content = "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
+    assert "forced flat" in content
+
+
+def test_on_session_close_leaves_position_open_on_flatten_failure(tmp_path):
+    """A broker-side failure (real IB errors only) must not silently drop the
+    position — it stays open and the operator gets an explicit Telegram alert."""
+
+    class FailingBroker(StubBroker):
+        def sell_option(self, contract, qty):
+            raise RuntimeError("IB rejected the order")
+
+    broker = FailingBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
+    notifier = RecordingNotifier()
+    sess = make_session_with_notifier(tmp_path, broker, notifier)
+    sess.position = make_position(broker)
+
+    LiveRunner([sess])._on_session_close()
+
+    assert sess.position is not None, "a failed flatten must not silently drop the position"
+    assert notifier.statuses, "notify_status should alert on a failed EOD flatten"
+    assert "FAILED" in notifier.statuses[0]
+    content = "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
+    assert '"error"' in content
