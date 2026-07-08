@@ -220,7 +220,10 @@ def cmd_replay(args) -> None:
     ctx = RuntimeContext(
         settings=settings,
         broker=stub,
-        journal=Journal(settings.log_dir),
+        # crash recovery replays logs/journal-*.jsonl, so those files must
+        # stay live-only — replay's synthetic fills go in their own directory
+        # (backtest already isolates itself the same way)
+        journal=Journal(settings.log_dir / "replays"),
         symbol=symbol,
         use_llm=not args.no_llm,
     )

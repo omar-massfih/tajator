@@ -1,6 +1,6 @@
 """Startup preflight: kill switch, resting orders, position reconciliation."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -8,7 +8,7 @@ import pytest
 from tajator.broker.base import BrokerOptionPosition
 from tajator.config import Settings
 from tajator.journal import Journal
-from tajator.models import OpenPosition, SelectedContract
+from tajator.models import ExecutedAction, OpenPosition, SelectedContract
 from tajator.notify import NullNotifier
 from tajator.startup import check_kill_switch, reconcile_positions, run_startup_checks
 from tajator.state_store import PersistedSession, PersistedState, StateStore
@@ -20,19 +20,19 @@ NOW = datetime(2026, 7, 8, 8, 0, tzinfo=ET)
 
 
 def make_settings(tmp_path, **kwargs):
+    kwargs.setdefault("symbols", ["NVDA"])
     return Settings(
         _env_file=None,
         kill_switch_file=tmp_path / "KILL",
         state_file=tmp_path / "state.json",
         log_dir=tmp_path,
-        symbols=["NVDA"],
         **kwargs,
     )
 
 
-def make_position(qty=2, con_id=None, symbol="NVDA"):
+def make_position(qty=2, con_id=None, symbol="NVDA", strike=200.0):
     contract = SelectedContract(
-        symbol=symbol, expiry="20260710", strike=200.0, right="P", con_id=con_id
+        symbol=symbol, expiry="20260710", strike=strike, right="P", con_id=con_id
     )
     plan = build_plan(
         direction="put", level_price=200.5, stop_price=200.9,
@@ -160,8 +160,8 @@ class FakeBroker:
         return self.other
 
 
-def run_checks(tmp_path, broker, state=None):
-    settings = make_settings(tmp_path)
+def run_checks(tmp_path, broker, state=None, **settings_kwargs):
+    settings = make_settings(tmp_path, **settings_kwargs)
     store = StateStore(settings.state_file)
     if state is not None:
         settings.state_file.write_text(state if isinstance(state, str) else state.model_dump_json())
@@ -208,3 +208,132 @@ def test_matching_position_is_adopted_and_reseeded(tmp_path):
     # the store must be seeded immediately, even before the first tick
     reloaded = StateStore(settings.state_file).load()
     assert reloaded.sessions["NVDA"].position.qty_remaining == 2
+
+
+# -- journal-replay crash recovery ---------------------------------------------------
+
+
+def make_action(kind="entry", qty=1, ts=NOW):
+    return ExecutedAction(kind=kind, qty=qty, premium=2.97, equity_price=200.2, ts=ts)
+
+
+def write_fill(tmp_path, position, kind="entry", ts=NOW, symbol="NVDA", qty=1):
+    Journal(tmp_path).write(
+        "fill", ts=ts, symbol=symbol, action=make_action(kind, qty, ts), position=position
+    )
+
+
+def journal_content(tmp_path):
+    return "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
+
+
+def test_crash_window_position_recovered_from_journal(tmp_path):
+    # crash between the entry fill (journaled) and the state.json write:
+    # no persisted state at all, but today's journal explains the position
+    write_fill(tmp_path, make_position(qty=2, con_id=222), qty=2)
+    adopted, settings = run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+    assert adopted["NVDA"].position is not None
+    assert adopted["NVDA"].position.plan.stop_price == 200.9
+    assert adopted["NVDA"].trades_today == 1
+    content = journal_content(tmp_path)
+    assert "position_recovered" in content and "position_adopted" not in content
+    reloaded = StateStore(settings.state_file).load()
+    assert reloaded.sessions["NVDA"].position.qty_remaining == 2
+
+
+def test_stale_state_qty_mismatch_recovered_from_scale_out_fill(tmp_path):
+    # crash between a scale-out fill and the persist: state.json still says 3
+    pos3 = make_position(qty=3, con_id=222)
+    write_fill(tmp_path, pos3, kind="entry", ts=NOW, qty=3)
+    after = pos3.model_copy(update={"qty_remaining": 2, "pieces_sold": 1})
+    write_fill(tmp_path, after, kind="scale_out", ts=NOW + timedelta(minutes=5))
+    adopted, _ = run_checks(
+        tmp_path,
+        FakeBroker(positions=[broker_pos(qty=2, con_id=222)]),
+        state=persisted(pos3, trades_today=1),
+    )
+    assert adopted["NVDA"].position.qty_remaining == 2
+    assert adopted["NVDA"].position.pieces_sold == 1
+    assert adopted["NVDA"].trades_today == 1
+    assert "position_recovered" in journal_content(tmp_path)
+
+
+def test_journal_flat_but_broker_holds_still_refuses(tmp_path):
+    pos = make_position(qty=2, con_id=222)
+    write_fill(tmp_path, pos, kind="entry", ts=NOW, qty=2)
+    write_fill(
+        tmp_path, pos.model_copy(update={"qty_remaining": 0}),
+        kind="stop_exit", ts=NOW + timedelta(minutes=5), qty=2,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+    assert "cannot explain" in str(exc_info.value)
+
+
+def test_journal_broker_qty_mismatch_still_refuses(tmp_path):
+    write_fill(tmp_path, make_position(qty=3, con_id=222), qty=3)
+    with pytest.raises(SystemExit):
+        run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+
+
+def test_journal_fill_without_con_id_still_refuses(tmp_path):
+    # replay/stub fills carry con_id null — the strict match must reject them
+    write_fill(tmp_path, make_position(qty=2, con_id=None), qty=2)
+    with pytest.raises(SystemExit):
+        run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+
+
+def test_journal_contract_mismatch_still_refuses(tmp_path):
+    write_fill(tmp_path, make_position(qty=2, con_id=222, strike=197.5), qty=2)
+    with pytest.raises(SystemExit):
+        run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+
+
+def test_overnight_crash_recovers_from_yesterdays_journal(tmp_path):
+    yesterday = NOW - timedelta(days=1)
+    write_fill(tmp_path, make_position(qty=2, con_id=222), ts=yesterday, qty=2)
+    adopted, _ = run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+    assert adopted["NVDA"].position is not None
+    assert adopted["NVDA"].trades_today == 0  # yesterday's entry does not count
+
+
+def test_recovered_trades_today_takes_the_max(tmp_path):
+    # persisted (stale) knows 1 trade; the journal shows a failed order plus
+    # the entry the broker holds — the conservative count wins
+    Journal(tmp_path).write("entry_order_failed", ts=NOW, symbol="NVDA", error="timeout")
+    pos = make_position(qty=2, con_id=222)
+    write_fill(tmp_path, pos, kind="entry", ts=NOW + timedelta(minutes=5), qty=2)
+    stale = make_position(qty=3, con_id=222)
+    adopted, _ = run_checks(
+        tmp_path,
+        FakeBroker(positions=[broker_pos(qty=2, con_id=222)]),
+        state=persisted(stale, trades_today=1),
+    )
+    assert adopted["NVDA"].trades_today == 2
+
+
+def test_corrupt_trailing_journal_line_does_not_block_recovery(tmp_path):
+    write_fill(tmp_path, make_position(qty=2, con_id=222), qty=2)
+    path = tmp_path / f"journal-{TODAY.isoformat()}.jsonl"
+    with path.open("a") as f:
+        f.write('{"ts": "2026-07-')  # crash mid-append
+    adopted, _ = run_checks(tmp_path, FakeBroker(positions=[broker_pos(qty=2, con_id=222)]))
+    assert adopted["NVDA"].position is not None
+    content = journal_content(tmp_path)
+    assert "position_recovered" in content
+    assert "startup_warning" in content and "unparseable" in content
+
+
+def test_recovery_is_all_or_nothing_across_symbols(tmp_path):
+    # NVDA is journal-recoverable, SPY is not — the launch must still refuse,
+    # showing the first pass's diagnostics for both
+    write_fill(tmp_path, make_position(qty=2, con_id=222), qty=2)
+    spy = broker_pos(qty=1, con_id=333, symbol="SPY")
+    with pytest.raises(SystemExit) as exc_info:
+        run_checks(
+            tmp_path,
+            FakeBroker(positions=[broker_pos(qty=2, con_id=222), spy]),
+            symbols=["NVDA", "SPY"],
+        )
+    assert "NVDA" in str(exc_info.value) and "SPY" in str(exc_info.value)
+    assert "position_recovered" not in journal_content(tmp_path)
