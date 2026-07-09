@@ -119,7 +119,7 @@ def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
 
     # 3. Scaling phase.
     ref = plan.target_refs[position.pieces_sold]
-    target = _target_value(ref, snapshot, plan.direction)
+    target = _target_value(ref, snapshot, plan)
     if target is None:
         return ManageAction(kind="hold")
     if _favorable_move(price, plan) < _min_scale_move(plan):
@@ -144,13 +144,25 @@ def _min_scale_move(plan: PositionPlan) -> float:
     return abs(plan.entry_equity_price - plan.stop_price) / 2
 
 
-def _target_value(ref: str, snapshot: Snapshot, direction: Direction) -> float | None:
+def _target_value(ref: str, snapshot: Snapshot, plan: PositionPlan) -> float | None:
     if ref == "ema50_vwap":
-        vals = [v for v in (snapshot.ema50, snapshot.vwap) if v is not None]
+        vals = [
+            v for v in (snapshot.ema50, snapshot.vwap)
+            if v is not None and _is_profit_side(v, plan)
+        ]
         if not vals:
             return None
         # The nearer reference in the profit direction triggers first.
-        return min(vals) if direction == "call" else max(vals)
+        return min(vals) if plan.direction == "call" else max(vals)
     if ref == "hod_lod":
-        return snapshot.hod if direction == "call" else snapshot.lod
+        target = snapshot.hod if plan.direction == "call" else snapshot.lod
+        if target is None or not _is_profit_side(target, plan):
+            return None
+        return target
     return None
+
+
+def _is_profit_side(target: float, plan: PositionPlan) -> bool:
+    if plan.direction == "call":
+        return target > plan.entry_equity_price
+    return target < plan.entry_equity_price

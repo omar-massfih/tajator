@@ -82,6 +82,14 @@ def test_scale_waits_for_meaningful_favorable_move():
     assert a.kind == "scale_candidate" and a.target_ref == "ema50_vwap"
 
 
+def test_scale_ignores_ema50_vwap_behind_entry():
+    pos = call_position(qty=2, entry=202.94, stop=202.50)
+    assert evaluate(pos, snap(203.20, ema50=201.74, vwap=201.90)).kind == "hold"
+
+    pos = put_position(qty=2, entry=202.94, stop=203.38)
+    assert evaluate(pos, snap(202.68, ema50=203.40, vwap=203.10)).kind == "hold"
+
+
 def test_missing_indicator_holds():
     assert evaluate(call_position(), snap(500.1)).kind == "hold"  # no ema50/vwap yet
 
