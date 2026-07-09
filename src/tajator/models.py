@@ -131,6 +131,7 @@ class OpenPosition(BaseModel):
     plan: PositionPlan
     qty_remaining: int
     pieces_sold: int = 0
+    profit_taken: bool = False
     opened_at: datetime
     favorable_extreme: float | None = None  # best equity price seen, for VWAP runner rule
     protective_stop: ProtectiveStop | None = None  # resting broker-side stop, if placed

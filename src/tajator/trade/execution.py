@@ -10,7 +10,7 @@ from ..broker.base import Broker
 from ..config import Settings
 from ..models import Decision, Direction, ExecutedAction, OpenPosition, Snapshot
 from .contracts import select_contract
-from .position import build_plan, current_piece_qty, update_extreme
+from .position import active_stop_price, build_plan, current_piece_qty, update_extreme
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def restore_protective_stop(
         position.protective_stop = broker.place_protective_stop(
             position.contract,
             position.qty_remaining,
-            position.plan.stop_price,
+            active_stop_price(position),
             position.plan.direction,
             stop_order_ref(settings, symbol),
         )
@@ -140,6 +140,8 @@ def execute_scale_out(
         fill = broker.sell_option(position.contract, qty)
         if fill.qty == qty:
             position.pieces_sold += 1  # a partially sold piece is retried on the next signal
+        if fill.qty > 0:
+            position.profit_taken = True
         position.qty_remaining -= fill.qty
         actions.append(
             ExecutedAction(

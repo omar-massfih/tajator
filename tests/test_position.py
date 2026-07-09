@@ -90,7 +90,17 @@ def test_runner_break_even_exit():
     pos = call_position(pieces_sold=2)
     assert evaluate(pos, snap(500.0, ema9=500.0)).kind == "hold"
     a = evaluate(pos, snap(499.15, ema9=500.0))
-    assert a.kind == "runner_exit" and "break-even" in a.reason
+    assert a.kind == "stop_exit" and "break-even" in a.reason
+
+
+def test_profit_taken_moves_stop_to_break_even_for_call_and_put():
+    call = call_position(pieces_sold=1)
+    a = evaluate(call, snap(499.19, ema9=500.0))
+    assert a.kind == "stop_exit" and "break-even" in a.reason
+
+    put = put_position(pieces_sold=1)
+    a = evaluate(put, snap(501.81, ema9=501.0))
+    assert a.kind == "stop_exit" and "break-even" in a.reason
 
 
 def test_runner_vwap_loss_exit_only_after_being_beyond():

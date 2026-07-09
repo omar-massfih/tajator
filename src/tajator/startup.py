@@ -22,6 +22,7 @@ from .notify import Notifier
 from .recovery import RecoveredSession, recover_sessions
 from .state_store import PersistedState, PersistedSession, StateStore
 from .trade.execution import restore_protective_stop, stop_order_ref
+from .trade.position import active_stop_price
 
 
 def check_kill_switch(settings: Settings, notifier: Notifier | None = None) -> None:
@@ -192,14 +193,14 @@ def reconcile_protective_stops(
             pos.protective_stop = ProtectiveStop(
                 order_id=matched.order_id, perm_id=matched.perm_id,
                 order_ref=matched.order_ref, qty=matched.qty,
-                stop_price=pos.plan.stop_price,
+                stop_price=active_stop_price(pos),
             )
         elif settings.protective_stop_enabled:
             restore_protective_stop(broker, settings, pos, symbol)
             if pos.protective_stop is not None:
                 warnings.append(
                     f"{symbol}: protective stop was missing — re-placed for "
-                    f"{pos.qty_remaining}x {pos.contract.local_name} at {pos.plan.stop_price}"
+                    f"{pos.qty_remaining}x {pos.contract.local_name} at {active_stop_price(pos)}"
                 )
             else:
                 warnings.append(

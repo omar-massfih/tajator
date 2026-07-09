@@ -21,6 +21,7 @@ from ..models import (
     SetupCandidate,
     Snapshot,
 )
+from ..trade.position import active_stop_price
 from .prompts import PREP_SYSTEM_PROMPT, SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ def format_snapshot(
             "",
             f"OPEN POSITION: {position.qty_remaining}x {position.contract.local_name} "
             f"({p.direction}), entry equity {p.entry_equity_price:.2f}, "
-            f"stop {p.stop_price:.2f}, pieces sold {position.pieces_sold}/{len(p.pieces)}",
+            f"stop {active_stop_price(position):.2f}, pieces sold {position.pieces_sold}/{len(p.pieces)}",
         ]
     if manage_note:
         lines += ["", f"QUESTION: {manage_note}"]

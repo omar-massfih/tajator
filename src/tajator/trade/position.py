@@ -72,17 +72,26 @@ def current_piece_qty(position: OpenPosition) -> int:
     return position.plan.pieces[position.pieces_sold]
 
 
+def active_stop_price(position: OpenPosition) -> float:
+    """The enforced stop. After any profit-taking, protect the remainder at break-even."""
+    if position.profit_taken or position.pieces_sold > 0:
+        return position.plan.entry_equity_price
+    return position.plan.stop_price
+
+
 def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
     plan = position.plan
     price = snapshot.price
     long = plan.direction == "call"
 
     # 1. Mental stop — first, always.
-    stop_hit = price <= plan.stop_price if long else price >= plan.stop_price
+    stop_price = active_stop_price(position)
+    stop_hit = price <= stop_price if long else price >= stop_price
     if stop_hit:
+        stop_label = "break-even stop" if stop_price == plan.entry_equity_price else "mental stop"
         return ManageAction(
             kind="stop_exit",
-            reason=f"equity {price} through mental stop {plan.stop_price} — exit everything",
+            reason=f"equity {price} through {stop_label} {stop_price} — exit everything",
         )
 
     in_runner_phase = len(plan.pieces) > 1 and position.pieces_sold == len(plan.pieces) - 1
