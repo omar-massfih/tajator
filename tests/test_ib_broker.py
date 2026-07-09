@@ -26,6 +26,25 @@ def test_partial_fill_halt_activates_kill_switch(settings):
     assert "delete this file" in text
 
 
+def test_partial_fill_halt_notifies(settings):
+    class RecordingNotifier:
+        def __init__(self):
+            self.statuses = []
+
+        def notify_fill(self, symbol, action, position):
+            pass
+
+        def notify_status(self, text):
+            self.statuses.append(text)
+
+    notifier = RecordingNotifier()
+    broker = IBBroker(settings, notifier=notifier)
+    broker._halt_new_entries("partial fill: BUY 1/4 SPY 20260710 500C")
+    assert notifier.statuses
+    assert "KILL switch activated" in notifier.statuses[0]
+    assert "partial fill" in notifier.statuses[0]
+
+
 def test_open_option_positions_reports_configured_symbols_only(settings):
     broker = IBBroker(settings)
 

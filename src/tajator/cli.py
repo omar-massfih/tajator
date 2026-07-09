@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .journal import Journal
+from .notify import NullNotifier, TelegramNotifier
 
 ET = ZoneInfo("America/New_York")
 
@@ -70,11 +71,19 @@ def main() -> None:
         cmd_replay(args)
 
 
-def _ib_broker(settings=None):
+def _notifier(settings):
+    return (
+        TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+        if settings.telegram_bot_token and settings.telegram_chat_id
+        else NullNotifier()
+    )
+
+
+def _ib_broker(settings=None, notifier=None):
     from .broker.ib import IBBroker
 
     settings = settings or load_settings()
-    broker = IBBroker(settings)
+    broker = IBBroker(settings, notifier=notifier)
     try:
         broker.connect()
     except Exception as exc:  # noqa: BLE001
@@ -89,21 +98,16 @@ def cmd_run() -> None:
     from .graph.nodes import RuntimeContext
     from .llm.decide import build_llm
     from .models import MorningBriefing
-    from .notify import NullNotifier, TelegramNotifier
     from .runner import LiveRunner, TradingSession
     from .startup import check_kill_switch, run_startup_checks
     from .state_store import StateStore
 
     settings = load_settings()
-    check_kill_switch(settings)
-    settings, broker = _ib_broker(settings)
+    notifier = _notifier(settings)
+    check_kill_switch(settings, notifier)
+    settings, broker = _ib_broker(settings, notifier)
     journal = Journal(settings.log_dir)
     broker.journal = journal  # order timelines land next to the trade records
-    notifier = (
-        TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-        if settings.telegram_bot_token and settings.telegram_chat_id
-        else NullNotifier()
-    )
     store = StateStore(settings.state_file)
     try:
         # Refuse on resting orders or positions that persisted state cannot

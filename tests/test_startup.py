@@ -67,6 +67,27 @@ def test_kill_switch_file_refuses_launch(tmp_path):
     assert "partial fill: reconcile first" in str(exc_info.value)
 
 
+def test_kill_switch_file_notifies_on_launch_refusal(tmp_path):
+    class RecordingNotifier:
+        def __init__(self):
+            self.statuses = []
+
+        def notify_fill(self, symbol, action, position):
+            pass
+
+        def notify_status(self, text):
+            self.statuses.append(text)
+
+    settings = make_settings(tmp_path)
+    settings.kill_switch_file.write_text("partial fill: reconcile first")
+    notifier = RecordingNotifier()
+    with pytest.raises(SystemExit):
+        check_kill_switch(settings, notifier)
+    assert notifier.statuses
+    assert "KILL switch is ON" in notifier.statuses[0]
+    assert "partial fill: reconcile first" in notifier.statuses[0]
+
+
 def test_no_kill_switch_passes(tmp_path):
     check_kill_switch(make_settings(tmp_path))
 

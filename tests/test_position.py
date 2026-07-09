@@ -77,6 +77,15 @@ def test_scale_sequence_for_call():
     assert a.kind == "scale_candidate" and a.target_ref == "hod_lod"
 
 
+def test_scale_waits_for_meaningful_favorable_move():
+    pos = put_position(qty=2, entry=202.12, stop=202.55)
+    # EMA9 drifted near entry after a small reaction: too early to scale.
+    assert evaluate(pos, snap(202.03, ema9=202.09)).kind == "hold"
+    # Once the move reaches at least half the planned equity risk, EMA9 can trigger.
+    a = evaluate(pos, snap(201.90, ema9=202.00))
+    assert a.kind == "scale_candidate" and a.target_ref == "ema9"
+
+
 def test_missing_indicator_holds():
     assert evaluate(call_position(), snap(500.1)).kind == "hold"  # no ema9 yet
 

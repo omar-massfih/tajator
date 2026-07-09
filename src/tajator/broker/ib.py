@@ -19,6 +19,7 @@ from ib_async.order import PriceCondition
 from ..config import Settings
 from ..journal import Journal
 from ..models import Bar, Direction, ProtectiveStop, SelectedContract
+from ..notify import Notifier, NullNotifier
 from .base import (
     Broker,
     BrokerOpenOrder,
@@ -39,9 +40,10 @@ STOP_ACK_TIMEOUT_S = 5  # wait for a protective stop to acknowledge at IB
 
 
 class IBBroker(Broker):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, notifier: Notifier | None = None):
         self.settings = settings
         self.ib = IB()
+        self.notifier = notifier or NullNotifier()
         self.journal: Journal | None = None  # set by callers that want order timelines
         self._stocks: dict[str, Stock] = {}
         self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
@@ -581,9 +583,13 @@ class IBBroker(Broker):
 
     def _halt_new_entries(self, reason: str) -> None:
         log.error("%s — activating kill switch %s", reason, self.settings.kill_switch_file)
-        self.settings.kill_switch_file.write_text(
+        text = (
             f"{reason} at {self.now().isoformat()}\n"
             "Reconcile the position in IB Gateway, then delete this file to resume entries.\n"
+        )
+        self.settings.kill_switch_file.write_text(text)
+        self.notifier.notify_status(
+            f"tajator KILL switch activated at {self.settings.kill_switch_file}:\n{text.strip()}"
         )
 
 

@@ -4,8 +4,9 @@ Rules, checked in this order every tick (stop always first):
 1. Mental stop on the EQUITY price -> flatten immediately. Never LLM-negotiable.
 2. Runner phase (last piece): exit at break-even, or on adverse VWAP cross
    after price had traded beyond VWAP in our favor.
-3. Scaling phase: when the current piece's target reference is touched,
-   emit a scale candidate — the LLM may say "hold one more bar", but the
+3. Scaling phase: when the trade has moved at least half its planned equity
+   risk in our favor and the current piece's target reference is touched, emit
+   a scale candidate — the LLM may say "hold one more bar", but the
    deterministic fallback (and any LLM error) scales the piece.
 
 One-contract positions follow the notes' one-contract process: full exit
@@ -111,6 +112,8 @@ def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
     target = _target_value(ref, snapshot, plan.direction)
     if target is None:
         return ManageAction(kind="hold")
+    if _favorable_move(price, plan) < _min_scale_move(plan):
+        return ManageAction(kind="hold")
     touched = price >= target if long else price <= target
     if touched:
         return ManageAction(
@@ -119,6 +122,16 @@ def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
             reason=f"price {price} touched {ref} target {target:.2f}",
         )
     return ManageAction(kind="hold")
+
+
+def _favorable_move(price: float, plan: PositionPlan) -> float:
+    if plan.direction == "call":
+        return price - plan.entry_equity_price
+    return plan.entry_equity_price - price
+
+
+def _min_scale_move(plan: PositionPlan) -> float:
+    return abs(plan.entry_equity_price - plan.stop_price) / 2
 
 
 def _target_value(ref: str, snapshot: Snapshot, direction: Direction) -> float | None:

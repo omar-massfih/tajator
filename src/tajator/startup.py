@@ -24,14 +24,17 @@ from .state_store import PersistedState, PersistedSession, StateStore
 from .trade.execution import restore_protective_stop, stop_order_ref
 
 
-def check_kill_switch(settings: Settings) -> None:
+def check_kill_switch(settings: Settings, notifier: Notifier | None = None) -> None:
     """Refuse to launch while the kill switch is set (call before connecting).
     Per-tick guardrails also honor it, but a file written because the account
     needs reconciling must stop a fresh launch outright, not just entries."""
     f = settings.kill_switch_file
     if f.exists():
+        text = f.read_text().strip()
+        if notifier is not None:
+            notifier.notify_status(f"tajator KILL switch is ON at {f}:\n{text}")
         sys.exit(
-            f"kill switch file present at {f}:\n  {f.read_text().strip()}\n"
+            f"kill switch file present at {f}:\n  {text}\n"
             "Reconcile the account in IB Gateway, then delete the file and restart."
         )
 
