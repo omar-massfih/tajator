@@ -7,7 +7,8 @@ Rules, checked in this order every tick (stop always first):
 3. Scaling phase: when the trade has moved at least half its planned equity
    risk in our favor and the current piece's target reference is touched, emit
    a scale candidate — the LLM may say "hold one more bar", but the
-   deterministic fallback (and any LLM error) scales the piece.
+   deterministic fallback (and any LLM error) scales the piece. EMA9 is chart
+   context only; it is too shallow for an automatic exit.
 
 One-contract positions follow the notes' one-contract process: full exit
 at the first target, no runner phase.
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 
 from ..models import Direction, OpenPosition, PositionPlan, Snapshot
 
-SCALE_REFS = ["ema9", "ema50_vwap", "hod_lod"]
+SCALE_REFS = ["ema50_vwap", "hod_lod"]
 
 
 class ManageAction(BaseModel):
@@ -31,8 +32,8 @@ class ManageAction(BaseModel):
 
 
 def split_pieces(qty: int) -> list[int]:
-    """Split contracts into up to 4 scale-out pieces, extras loaded up front."""
-    n = min(qty, 4)
+    """Split contracts into scale-out pieces, extras loaded up front."""
+    n = min(qty, len(SCALE_REFS) + 1)
     base, rem = divmod(qty, n)
     return [base + (1 if i < rem else 0) for i in range(n)]
 
@@ -46,7 +47,7 @@ def build_plan(
     qty: int,
 ) -> PositionPlan:
     pieces = split_pieces(qty)
-    refs = SCALE_REFS[: len(pieces) - 1] + ["runner"] if len(pieces) > 1 else ["ema9"]
+    refs = SCALE_REFS[: len(pieces) - 1] + ["runner"] if len(pieces) > 1 else [SCALE_REFS[0]]
     return PositionPlan(
         direction=direction,
         level_price=level_price,
@@ -135,8 +136,6 @@ def _min_scale_move(plan: PositionPlan) -> float:
 
 
 def _target_value(ref: str, snapshot: Snapshot, direction: Direction) -> float | None:
-    if ref == "ema9":
-        return snapshot.ema9
     if ref == "ema50_vwap":
         vals = [v for v in (snapshot.ema50, snapshot.vwap) if v is not None]
         if not vals:

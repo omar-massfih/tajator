@@ -111,7 +111,7 @@ class PositionPlan(BaseModel):
     entry_premium: float
     total_qty: int
     pieces: list[int]  # contract counts per scale-out piece, runner last
-    target_refs: list[str]  # e.g. ["ema9", "ema50_vwap", "hod_lod", "runner"]
+    target_refs: list[str]  # e.g. ["ema50_vwap", "hod_lod", "runner"]
 
 
 class ProtectiveStop(BaseModel):

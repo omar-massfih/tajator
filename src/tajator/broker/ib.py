@@ -317,6 +317,7 @@ class IBBroker(Broker):
         opt = self._option(contract)
         qty_before = self._snapshot_position(opt)
         order = MarketOrder(side, qty)
+        order.tif = "DAY"
         order.orderRef = f"{self.settings.order_ref_prefix}:{contract.symbol}"
         trade = self.ib.placeOrder(opt, order)
         deadline = time.monotonic() + self.settings.order_timeout_s
@@ -343,7 +344,7 @@ class IBBroker(Broker):
         a cancel can race the fill, so IB reports Cancelled (filled 0) for an
         order that actually executed. Reconcile against execution reports and
         the account position, adopt whatever really filled, and halt new
-        entries — any non-Filled outcome means the account needs a look."""
+        entries when the fill is partial or unconfirmed."""
         grace = time.monotonic() + self.settings.fill_grace_s  # let late execution reports land
         while time.monotonic() < grace:
             self.ib.waitOnUpdate(timeout=1.0)
@@ -358,8 +359,8 @@ class IBBroker(Broker):
 
         premium = self._fill_premium(trade, filled)
         if filled and premium is not None:
-            full_confirmed_exit = side == "SELL" and filled == qty and confirmed
-            if not full_confirmed_exit:
+            full_confirmed_fill = filled == qty and confirmed
+            if not full_confirmed_fill:
                 self._halt_new_entries(
                     f"{label} — the {filled} filled contract(s) WERE adopted into the "
                     "session and will be managed normally"

@@ -12,7 +12,7 @@ def make_position() -> OpenPosition:
     contract = SelectedContract(symbol="SPY", expiry="20260710", strike=500.0, right="C")
     plan = PositionPlan(
         direction="call", level_price=500.0, stop_price=499.6, entry_equity_price=500.0,
-        entry_premium=1.5, total_qty=2, pieces=[1, 1], target_refs=["ema9"],
+        entry_premium=1.5, total_qty=2, pieces=[1, 1], target_refs=["ema50_vwap", "runner"],
     )
     return OpenPosition(contract=contract, plan=plan, qty_remaining=2, opened_at=datetime(2026, 7, 6, 11, 0, tzinfo=ET))
 

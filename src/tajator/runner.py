@@ -266,7 +266,9 @@ class TradingSession:
             self.ctx.journal.write(
                 "fill", ts=snap.ts, symbol=self.ctx.symbol, action=action, position=self.position
             )
+            self.ctx.notifier.notify_fill(self.ctx.symbol, action, self.position)
         self.position = None
+        self._persist()
         if verbose and actions:
             print(f"end of day — flattened {actions[-1].qty}x @ {actions[-1].premium:.2f}")
 

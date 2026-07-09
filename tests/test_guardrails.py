@@ -45,8 +45,8 @@ def open_position():
     contract = SelectedContract(symbol="SPY", expiry="20260710", strike=499.0, right="C")
     plan = PositionPlan(
         direction="call", level_price=499.0, stop_price=498.6, entry_equity_price=499.2,
-        entry_premium=2.0, total_qty=4, pieces=[1, 1, 1, 1],
-        target_refs=["ema9", "ema50_vwap", "hod_lod", "runner"],
+        entry_premium=2.0, total_qty=4, pieces=[2, 1, 1],
+        target_refs=["ema50_vwap", "hod_lod", "runner"],
     )
     return OpenPosition(contract=contract, plan=plan, qty_remaining=4, opened_at=MIDDAY)
 

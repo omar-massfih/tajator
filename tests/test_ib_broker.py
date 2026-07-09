@@ -96,7 +96,7 @@ class FakeIB:
         self.placed = []
 
     def placeOrder(self, contract, order):
-        self.placed.append((order.action, int(order.totalQuantity)))
+        self.placed.append((order.action, int(order.totalQuantity), order))
         self.qty += self.fill_effect if order.action == "BUY" else -self.fill_effect
         return self.trade
 
@@ -134,12 +134,13 @@ def place(settings, monkeypatch, trade, side="BUY", qty=1, **fake_ib_kwargs):
 
 
 def test_cancelled_but_actually_filled_adopts_the_fill(settings, monkeypatch):
-    """The incident case: status says Cancelled/0 filled, executions say otherwise."""
+    """A full fill confirmed by executions and account position is safe even if
+    IB briefly reported Cancelled/0 filled during preset normalization."""
     trade = make_trade(fills=[(1, 2.97)])
     fill = place(settings, monkeypatch, trade, qty=1, fill_effect=1)
     assert fill.qty == 1
     assert fill.premium == pytest.approx(2.97)
-    assert "adopted" in settings.kill_switch_file.read_text()
+    assert not settings.kill_switch_file.exists()
 
 
 def test_partial_fill_returns_partial_and_halts(settings, monkeypatch):
@@ -201,6 +202,20 @@ def test_clean_filled_path_untouched(settings, monkeypatch):
     assert fill.qty == 3
     assert fill.premium == pytest.approx(1.50)
     assert not settings.kill_switch_file.exists()
+
+
+def test_normal_market_orders_are_explicit_day(settings, monkeypatch):
+    trade = make_trade(status="Filled", status_filled=1, avg_price=2.50)
+    broker = IBBroker(settings)
+    fake_ib = FakeIB(trade, fill_effect=1)
+    broker.ib = fake_ib
+    monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
+    contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")
+
+    broker._place(contract, "BUY", 1)
+
+    _, _, order = fake_ib.placed[0]
+    assert order.tif == "DAY"
 
 
 # -- protective stop ------------------------------------------------------------

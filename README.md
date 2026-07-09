@@ -10,8 +10,9 @@ support/resistance strategy from `../trading/strategy-notes/` through **Interact
 
 The strategy in one line: buy **calls** as price moves down into support, buy **puts**
 as price moves up into resistance (incl. double tops/bottoms), mental stop ~40 cents
-beyond the level on the equity, scale out in pieces at the 9 EMA → 50 EMA/VWAP →
-high/low of day, and protect the final runner at break-even.
+beyond the level on the equity, use EMA9 as chart context only, scale out in
+pieces at the 50 EMA/VWAP → high/low of day, and protect the final runner at
+break-even.
 
 ## Design: the LLM proposes, code disposes
 
