@@ -2,8 +2,8 @@
 
 Rules, checked in this order every tick (stop always first):
 1. Mental stop on the EQUITY price -> flatten immediately. Never LLM-negotiable.
-2. Runner phase (last piece): exit at break-even, or on adverse VWAP cross
-   after price had traded beyond VWAP in our favor.
+2. Runner phase (last piece): exit at the first target's equity price, or on
+   adverse VWAP cross after price had traded beyond VWAP in our favor.
 3. Scaling phase: when the trade has moved at least half its planned equity
    risk in our favor and the current piece's target reference is touched, emit
    a scale candidate — the LLM may say "hold one more bar", but the
@@ -73,8 +73,10 @@ def current_piece_qty(position: OpenPosition) -> int:
 
 
 def active_stop_price(position: OpenPosition) -> float:
-    """The enforced stop. After any profit-taking, protect the remainder at break-even."""
+    """The enforced stop. After profit-taking, protect the remainder at the first target."""
     if position.profit_taken or position.pieces_sold > 0:
+        if position.profit_lock_price is not None:
+            return position.profit_lock_price
         return position.plan.entry_equity_price
     return position.plan.stop_price
 
@@ -88,7 +90,12 @@ def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
     stop_price = active_stop_price(position)
     stop_hit = price <= stop_price if long else price >= stop_price
     if stop_hit:
-        stop_label = "break-even stop" if stop_price == plan.entry_equity_price else "mental stop"
+        if stop_price == position.profit_lock_price:
+            stop_label = "first-target stop"
+        elif stop_price == plan.entry_equity_price:
+            stop_label = "break-even stop"
+        else:
+            stop_label = "mental stop"
         return ManageAction(
             kind="stop_exit",
             reason=f"equity {price} through {stop_label} {stop_price} — exit everything",

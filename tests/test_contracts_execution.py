@@ -74,6 +74,7 @@ def test_scale_and_exit_bookkeeping():
     assert a.kind == "scale_out"
     assert position.pieces_sold == 1
     assert position.qty_remaining == start_qty - a.qty
+    assert position.profit_lock_price == snap.price
 
     [a] = execute_exit(broker, settings, position, snap, "stop_exit", "stop hit")
     assert position.qty_remaining == 0

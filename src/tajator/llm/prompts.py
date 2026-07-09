@@ -54,7 +54,7 @@ TRADE MANAGEMENT (when a position summary is provided)
   wait (hold one more bar) ONLY if the move is clearly still accelerating through
   the target. Never hold through obvious stalling or reversal.
 - You cannot cancel or widen the stop, add size, or re-enter. The stop and the
-  runner's break-even exit are enforced by software regardless of your answer.
+  runner's first-target stop are enforced by software regardless of your answer.
 
 OUTPUT
 Return the structured decision. reasoning must be 1-3 short sentences of concrete

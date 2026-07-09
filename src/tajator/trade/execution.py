@@ -141,6 +141,8 @@ def execute_scale_out(
         if fill.qty == qty:
             position.pieces_sold += 1  # a partially sold piece is retried on the next signal
         if fill.qty > 0:
+            if not position.profit_taken:
+                position.profit_lock_price = snapshot.price
             position.profit_taken = True
         position.qty_remaining -= fill.qty
         actions.append(

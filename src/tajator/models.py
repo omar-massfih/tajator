@@ -132,6 +132,7 @@ class OpenPosition(BaseModel):
     qty_remaining: int
     pieces_sold: int = 0
     profit_taken: bool = False
+    profit_lock_price: float | None = None  # equity price protected after first scale-out
     opened_at: datetime
     favorable_extreme: float | None = None  # best equity price seen, for VWAP runner rule
     protective_stop: ProtectiveStop | None = None  # resting broker-side stop, if placed

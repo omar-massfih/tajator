@@ -12,7 +12,7 @@ The strategy in one line: buy **calls** as price moves down into support, buy **
 as price moves up into resistance (incl. double tops/bottoms), mental stop ~40 cents
 beyond the level on the equity, use EMA9 as chart context only, scale out in
 pieces at the 50 EMA/VWAP → high/low of day, and protect the final runner at
-break-even.
+the first target.
 
 ## Design: the LLM proposes, code disposes
 
@@ -25,7 +25,7 @@ break-even.
 - **Hard guardrails** veto anything else: market hours, max 2 trades/day, one position
   at a time, stop required on the correct side (20–60 cents), the LLM cannot invent
   trades the detector didn't flag, premium budget caps, and a kill-switch file.
-- **Stops are never LLM-negotiable**: the mental stop, runner break-even, and
+- **Stops are never LLM-negotiable**: the mental stop, first-target runner stop, and
   VWAP runner rules are enforced in code on every tick, before anything else.
 
 Graph per 1-minute tick:

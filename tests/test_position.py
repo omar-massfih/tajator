@@ -18,7 +18,7 @@ def call_position(qty=4, pieces_sold=0, entry=499.2, stop=498.6):
     plan = build_plan("call", 499.0, stop, entry, 2.0, qty)
     return OpenPosition(
         contract=CONTRACT, plan=plan, qty_remaining=qty - pieces_sold,
-        pieces_sold=pieces_sold, opened_at=TS,
+        pieces_sold=pieces_sold, profit_taken=pieces_sold > 0, opened_at=TS,
     )
 
 
@@ -26,7 +26,8 @@ def put_position(qty=4, pieces_sold=0, entry=501.8, stop=502.4):
     plan = build_plan("put", 502.0, stop, entry, 2.0, qty)
     return OpenPosition(
         contract=SelectedContract(symbol="SPY", expiry="20260710", strike=502.0, right="P"),
-        plan=plan, qty_remaining=qty - pieces_sold, pieces_sold=pieces_sold, opened_at=TS,
+        plan=plan, qty_remaining=qty - pieces_sold, pieces_sold=pieces_sold,
+        profit_taken=pieces_sold > 0, opened_at=TS,
     )
 
 
@@ -94,21 +95,26 @@ def test_missing_indicator_holds():
     assert evaluate(call_position(), snap(500.1)).kind == "hold"  # no ema50/vwap yet
 
 
-def test_runner_break_even_exit():
+def test_runner_falls_back_to_break_even_without_first_target_lock():
     pos = call_position(pieces_sold=2)
+    pos.profit_lock_price = None
     assert evaluate(pos, snap(500.0, ema9=500.0)).kind == "hold"
     a = evaluate(pos, snap(499.15, ema9=500.0))
     assert a.kind == "stop_exit" and "break-even" in a.reason
 
 
-def test_profit_taken_moves_stop_to_break_even_for_call_and_put():
+def test_profit_taken_moves_stop_to_first_target_for_call_and_put():
     call = call_position(pieces_sold=1)
-    a = evaluate(call, snap(499.19, ema9=500.0))
-    assert a.kind == "stop_exit" and "break-even" in a.reason
+    call.profit_lock_price = 500.5
+    assert evaluate(call, snap(500.6, ema9=500.0)).kind == "hold"
+    a = evaluate(call, snap(500.49, ema9=500.0))
+    assert a.kind == "stop_exit" and "first-target" in a.reason
 
     put = put_position(pieces_sold=1)
-    a = evaluate(put, snap(501.81, ema9=501.0))
-    assert a.kind == "stop_exit" and "break-even" in a.reason
+    put.profit_lock_price = 501.0
+    assert evaluate(put, snap(500.9, ema9=501.0)).kind == "hold"
+    a = evaluate(put, snap(501.01, ema9=501.0))
+    assert a.kind == "stop_exit" and "first-target" in a.reason
 
 
 def test_runner_vwap_loss_exit_only_after_being_beyond():
