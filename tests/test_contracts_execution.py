@@ -62,6 +62,8 @@ def test_execute_entry_builds_position_and_plan():
     assert abs(position.contract.strike - snap.price) <= 0.5
     assert position.plan.stop_price == 498.6
     assert position.qty_remaining == action.qty == sum(position.plan.pieces)
+    assert position.plan.hod_at_entry == snap.hod
+    assert position.plan.lod_at_entry == snap.lod
     assert broker.fills[0][0] == "BUY"
 
 

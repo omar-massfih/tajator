@@ -2,7 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from tajator.models import OpenPosition, SelectedContract, Snapshot
-from tajator.trade.position import build_plan, evaluate, split_pieces, update_extreme
+from tajator.trade.position import active_stop, build_plan, evaluate, split_pieces, update_extreme
 
 ET = ZoneInfo("America/New_York")
 TS = datetime(2026, 7, 6, 11, 0, tzinfo=ET)
@@ -67,10 +67,34 @@ def test_scale_sequence_for_call():
     assert evaluate(pos, snap(499.6, ema50=500.5, vwap=500.8)).kind == "hold"
     a = evaluate(pos, snap(500.6, ema9=500.0, ema50=500.5, vwap=500.8))
     assert a.kind == "scale_candidate" and a.target_ref == "ema50_vwap"
-    # piece 2: HOD
+    # piece 2: HOD as it stood at entry (the live HOD includes the current bar)
     pos.pieces_sold = 1
-    assert evaluate(pos, snap(501.0, ema9=500.0, hod=501.5)).kind == "hold"
-    a = evaluate(pos, snap(501.6, ema9=500.0, hod=501.5))
+    pos.plan.hod_at_entry = 501.5
+    assert evaluate(pos, snap(501.0, ema9=500.0, hod=501.0)).kind == "hold"
+    a = evaluate(pos, snap(501.6, ema9=500.0, hod=501.6))
+    assert a.kind == "scale_candidate" and a.target_ref == "hod_lod"
+
+
+def test_hod_lod_target_is_frozen_at_entry():
+    pos = call_position(pieces_sold=1)
+    pos.plan.hod_at_entry = 501.5
+    # The live HOD ran away above the entry-time level; the frozen ref still fires.
+    a = evaluate(pos, snap(501.6, hod=502.4))
+    assert a.kind == "scale_candidate" and a.target_ref == "hod_lod"
+    # A bar closing at a fresh HOD below the frozen ref is not a touch.
+    assert evaluate(pos, snap(501.0, hod=501.0)).kind == "hold"
+
+    pos = put_position(pieces_sold=1)
+    pos.plan.lod_at_entry = 500.0
+    a = evaluate(pos, snap(499.9, lod=499.5))
+    assert a.kind == "scale_candidate" and a.target_ref == "hod_lod"
+    assert evaluate(pos, snap(500.2, lod=500.2)).kind == "hold"
+
+
+def test_hod_lod_falls_back_to_live_extreme_for_legacy_plans():
+    pos = call_position(pieces_sold=1)
+    assert pos.plan.hod_at_entry is None
+    a = evaluate(pos, snap(501.6, hod=501.5))
     assert a.kind == "scale_candidate" and a.target_ref == "hod_lod"
 
 
@@ -114,6 +138,28 @@ def test_profit_taken_moves_stop_to_first_target_for_call_and_put():
     put.profit_lock_price = 501.0
     assert evaluate(put, snap(500.9, ema9=501.0)).kind == "hold"
     a = evaluate(put, snap(501.01, ema9=501.0))
+    assert a.kind == "stop_exit" and "first-target" in a.reason
+
+
+def test_active_stop_labels():
+    pos = call_position()
+    assert active_stop(pos) == (pos.plan.stop_price, "mental stop")
+
+    pos = call_position(pieces_sold=1)
+    assert active_stop(pos) == (pos.plan.entry_equity_price, "break-even stop")
+
+    pos.profit_lock_price = 500.5
+    assert active_stop(pos) == (500.5, "first-target stop")
+
+    # A profit lock that happens to equal entry is still labeled by provenance.
+    pos.profit_lock_price = pos.plan.entry_equity_price
+    assert active_stop(pos) == (pos.plan.entry_equity_price, "first-target stop")
+
+
+def test_runner_at_break_even_exits_via_stop_not_runner_rule():
+    pos = call_position(pieces_sold=2)
+    pos.profit_lock_price = 500.5
+    a = evaluate(pos, snap(499.2, vwap=501.0))
     assert a.kind == "stop_exit" and "first-target" in a.reason
 
 

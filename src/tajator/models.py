@@ -112,6 +112,10 @@ class PositionPlan(BaseModel):
     total_qty: int
     pieces: list[int]  # contract counts per scale-out piece, runner last
     target_refs: list[str]  # e.g. ["ema50_vwap", "hod_lod", "runner"]
+    # HOD/LOD as they stood at entry — the fixed hod_lod scale target. None on
+    # plans persisted before these fields existed (falls back to the live value).
+    hod_at_entry: float | None = None
+    lod_at_entry: float | None = None
 
 
 class ProtectiveStop(BaseModel):

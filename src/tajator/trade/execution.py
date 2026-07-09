@@ -59,6 +59,8 @@ def execute_entry(
         entry_equity_price=snapshot.price,
         entry_premium=fill.premium,
         qty=fill.qty,
+        hod_at_entry=snapshot.hod,
+        lod_at_entry=snapshot.lod,
     )
     position = OpenPosition(
         contract=contract, plan=plan, qty_remaining=fill.qty, opened_at=fill.ts
