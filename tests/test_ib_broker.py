@@ -147,6 +147,16 @@ def test_confirmed_zero_fill_sell_raises_without_halting(settings, monkeypatch):
     assert not settings.kill_switch_file.exists()
 
 
+def test_confirmed_full_sell_fill_does_not_halt_entries(settings, monkeypatch):
+    """A fully filled exit removes risk; IB's cancel/fill weirdness should be
+    journaled, but it should not leave a kill switch behind."""
+    trade = make_trade(status="Cancelled", fills=[(1, 1.48), (1, 1.38)])
+    fill = place(settings, monkeypatch, trade, side="SELL", qty=2, qty_before=2, fill_effect=2)
+    assert fill.qty == 2
+    assert fill.premium == pytest.approx(1.43)
+    assert not settings.kill_switch_file.exists()
+
+
 def test_position_moved_without_execution_reports_is_suspect(settings, monkeypatch):
     """Account gained a contract but no executions/price arrived: cannot build a
     Fill, must raise suspect and halt so the operator reconciles."""

@@ -356,10 +356,12 @@ class IBBroker(Broker):
 
         premium = self._fill_premium(trade, filled)
         if filled and premium is not None:
-            self._halt_new_entries(
-                f"{label} — the {filled} filled contract(s) WERE adopted into the "
-                "session and will be managed normally"
-            )
+            full_confirmed_exit = side == "SELL" and filled == qty and confirmed
+            if not full_confirmed_exit:
+                self._halt_new_entries(
+                    f"{label} — the {filled} filled contract(s) WERE adopted into the "
+                    "session and will be managed normally"
+                )
             return Fill(premium=premium, qty=filled, ts=self.now())
         if filled == 0 and confirmed:
             if side == "BUY":
