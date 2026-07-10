@@ -9,8 +9,20 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .market.levels import DOUBLE_MIN_PULLBACK_PCT, DOUBLE_MIN_TOUCH_SEPARATION_BARS
-from .market.setups import MIN_LEVEL_DIST_FROM_OPEN_PCT
+from .market.levels import (
+    CLUSTER_TOL,
+    DOUBLE_MIN_PULLBACK_PCT,
+    DOUBLE_MIN_TOUCH_SEPARATION_BARS,
+    SWING_WINDOW,
+)
+from .market.setups import (
+    APPROACH_BAND,
+    MIN_LEVEL_DIST_FROM_OPEN_PCT,
+    MIN_SPEED_PCT,
+    OVERSHOOT_BAND,
+    SPEED_WINDOW,
+)
+from .risk.guardrails import STOP_MAX_CENTS, STOP_MIN_CENTS
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001, 7496}  # 4001 = IB Gateway live, 7496 = TWS live
@@ -55,6 +67,18 @@ class Settings(BaseSettings):
     double_min_touch_separation_bars: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS
     double_min_pullback_pct: float = DOUBLE_MIN_PULLBACK_PCT
     min_level_dist_from_open_pct: float = MIN_LEVEL_DIST_FROM_OPEN_PCT
+    swing_window_bars: int = SWING_WINDOW
+    level_cluster_tol_pct: float = CLUSTER_TOL
+
+    # Setup detection tuning (defaults live next to the algorithm in market/setups.py)
+    approach_band_pct: float = APPROACH_BAND
+    overshoot_band_pct: float = OVERSHOOT_BAND
+    speed_window_bars: int = SPEED_WINDOW
+    min_speed_pct: float = MIN_SPEED_PCT
+
+    # Stop-distance rule (defaults live next to the gate in risk/guardrails.py)
+    stop_min_cents: int = STOP_MIN_CENTS
+    stop_max_cents: int = STOP_MAX_CENTS
 
     # Telegram trade notifications (optional — leave blank to disable)
     telegram_bot_token: str = ""

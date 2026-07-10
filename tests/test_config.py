@@ -45,13 +45,38 @@ def test_paper_mode_accepts_tws_paper_port():
 
 
 def test_level_quality_defaults_match_the_algorithm_constants():
-    from tajator.market.levels import DOUBLE_MIN_PULLBACK_PCT, DOUBLE_MIN_TOUCH_SEPARATION_BARS
+    from tajator.market.levels import (
+        CLUSTER_TOL,
+        DOUBLE_MIN_PULLBACK_PCT,
+        DOUBLE_MIN_TOUCH_SEPARATION_BARS,
+        SWING_WINDOW,
+    )
     from tajator.market.setups import MIN_LEVEL_DIST_FROM_OPEN_PCT
 
     settings = Settings(_env_file=None)
     assert settings.double_min_touch_separation_bars == DOUBLE_MIN_TOUCH_SEPARATION_BARS
     assert settings.double_min_pullback_pct == DOUBLE_MIN_PULLBACK_PCT
     assert settings.min_level_dist_from_open_pct == MIN_LEVEL_DIST_FROM_OPEN_PCT
+    assert settings.swing_window_bars == SWING_WINDOW
+    assert settings.level_cluster_tol_pct == CLUSTER_TOL
+
+
+def test_setup_and_stop_defaults_match_the_algorithm_constants():
+    from tajator.market.setups import (
+        APPROACH_BAND,
+        MIN_SPEED_PCT,
+        OVERSHOOT_BAND,
+        SPEED_WINDOW,
+    )
+    from tajator.risk.guardrails import STOP_MAX_CENTS, STOP_MIN_CENTS
+
+    settings = Settings(_env_file=None)
+    assert settings.approach_band_pct == APPROACH_BAND
+    assert settings.overshoot_band_pct == OVERSHOOT_BAND
+    assert settings.speed_window_bars == SPEED_WINDOW
+    assert settings.min_speed_pct == MIN_SPEED_PCT
+    assert settings.stop_min_cents == STOP_MIN_CENTS
+    assert settings.stop_max_cents == STOP_MAX_CENTS
 
 
 def test_level_quality_fields_parse_env_strings():
@@ -64,3 +89,17 @@ def test_level_quality_fields_parse_env_strings():
     assert settings.double_min_touch_separation_bars == 15
     assert settings.double_min_pullback_pct == 0.003
     assert settings.min_level_dist_from_open_pct == 0.005
+
+
+def test_setup_and_stop_fields_parse_env_strings():
+    settings = Settings(
+        _env_file=None,
+        approach_band_pct="0.005",
+        speed_window_bars="5",
+        stop_min_cents="10",
+        stop_max_cents="80",
+    )
+    assert settings.approach_band_pct == 0.005
+    assert settings.speed_window_bars == 5
+    assert settings.stop_min_cents == 10
+    assert settings.stop_max_cents == 80

@@ -71,6 +71,8 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             bars, state.get("prev_day_high"), state.get("prev_day_low"),
             min_touch_separation=settings.double_min_touch_separation_bars,
             min_pullback_pct=settings.double_min_pullback_pct,
+            swing_window=settings.swing_window_bars,
+            cluster_tol=settings.level_cluster_tol_pct,
         )
         return {"snapshot": snapshot, "levels": levels}
 
@@ -182,6 +184,10 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         candidates = detect_candidates(
             state["bars"], state["levels"], state["snapshot"],
             min_dist_from_open_pct=settings.min_level_dist_from_open_pct,
+            approach_band=settings.approach_band_pct,
+            overshoot_band=settings.overshoot_band_pct,
+            speed_window=settings.speed_window_bars,
+            min_speed_pct=settings.min_speed_pct,
         )
         if not candidates:
             return {"candidates": candidates}

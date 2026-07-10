@@ -7,10 +7,13 @@ scale-outs (risk-reducing) always pass; only entries are gated.
 from __future__ import annotations
 
 from datetime import datetime, time
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from ..config import Settings
 from ..models import Decision, OpenPosition, RiskVerdict, SetupCandidate
+
+if TYPE_CHECKING:  # runtime import would be circular: config imports our constants
+    from ..config import Settings
 
 ET = ZoneInfo("America/New_York")
 RTH_OPEN = time(9, 30)
@@ -76,7 +79,7 @@ def check(
             f"no detected {direction} setup matches level {decision.level_price} — LLM may not invent trades"
         )
 
-    violations.extend(_stop_violations(decision, direction))
+    violations.extend(_stop_violations(decision, direction, settings))
 
     # MAX_PREMIUM_USD is enforced at execution: size_entry sizes the order down
     # to fit the budget and skips the entry if even one contract busts it.
@@ -95,7 +98,7 @@ def _matching_candidate(
     return None
 
 
-def _stop_violations(decision: Decision, direction: str) -> list[str]:
+def _stop_violations(decision: Decision, direction: str, settings: Settings) -> list[str]:
     if decision.stop_price is None or decision.level_price is None:
         return ["entry requires both level_price and stop_price (plan before entry)"]
     out: list[str] = []
@@ -104,8 +107,9 @@ def _stop_violations(decision: Decision, direction: str) -> list[str]:
         out.append("call stop must be BELOW the support level")
     if direction == "put" and dist <= 0:
         out.append("put stop must be ABOVE the resistance level")
-    if not (STOP_MIN_CENTS / 100 <= abs(dist) <= STOP_MAX_CENTS / 100):
+    min_cents, max_cents = settings.stop_min_cents, settings.stop_max_cents
+    if not (min_cents / 100 <= abs(dist) <= max_cents / 100):
         out.append(
-            f"stop distance {abs(dist):.2f} outside the {STOP_MIN_CENTS}–{STOP_MAX_CENTS} cent rule"
+            f"stop distance {abs(dist):.2f} outside the {min_cents}–{max_cents} cent rule"
         )
     return out

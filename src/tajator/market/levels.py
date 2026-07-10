@@ -107,14 +107,16 @@ def swing_levels(
     *,
     min_touch_separation: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS,
     min_pullback_pct: float = DOUBLE_MIN_PULLBACK_PCT,
+    swing_window: int = SWING_WINDOW,
+    cluster_tol: float = CLUSTER_TOL,
 ) -> list[Level]:
-    if len(session) < 2 * SWING_WINDOW + 1:
+    if len(session) < 2 * swing_window + 1:
         return []
-    highs, lows = _swing_extrema(session)
+    highs, lows = _swing_extrema(session, k=swing_window)
     levels: list[Level] = []
     for cluster, is_top, double, single in (
-        *((c, True, "double_top", "swing_high") for c in _cluster(highs)),
-        *((c, False, "double_bottom", "swing_low") for c in _cluster(lows)),
+        *((c, True, "double_top", "swing_high") for c in _cluster(highs, tol=cluster_tol)),
+        *((c, False, "double_bottom", "swing_low") for c in _cluster(lows, tol=cluster_tol)),
     ):
         qualified = _is_qualified_double(
             cluster, session, is_top=is_top,
@@ -138,6 +140,8 @@ def detect_levels(
     *,
     min_touch_separation: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS,
     min_pullback_pct: float = DOUBLE_MIN_PULLBACK_PCT,
+    swing_window: int = SWING_WINDOW,
+    cluster_tol: float = CLUSTER_TOL,
 ) -> list[Level]:
     df = bars_to_df(bars)
     if df.empty:
@@ -162,10 +166,12 @@ def detect_levels(
     # doesn't create the level it is about to be traded against.
     levels.extend(
         swing_levels(
-            session.iloc[:-SWING_WINDOW] if len(session) > SWING_WINDOW else session,
+            session.iloc[:-swing_window] if len(session) > swing_window else session,
             current,
             min_touch_separation=min_touch_separation,
             min_pullback_pct=min_pullback_pct,
+            swing_window=swing_window,
+            cluster_tol=cluster_tol,
         )
     )
 

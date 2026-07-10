@@ -41,15 +41,19 @@ def detect_candidates(
     snapshot: Snapshot,
     *,
     min_dist_from_open_pct: float = MIN_LEVEL_DIST_FROM_OPEN_PCT,
+    approach_band: float = APPROACH_BAND,
+    overshoot_band: float = OVERSHOOT_BAND,
+    speed_window: int = SPEED_WINDOW,
+    min_speed_pct: float = MIN_SPEED_PCT,
 ) -> list[SetupCandidate]:
-    if len(bars) < SPEED_WINDOW + 1:
+    if len(bars) < speed_window + 1:
         return []
 
     price = snapshot.price
-    net_move = price - bars[-1 - SPEED_WINDOW].close  # + = rising, - = falling
-    min_speed = MIN_SPEED_PCT * price
-    band = APPROACH_BAND * price
-    overshoot = OVERSHOOT_BAND * price
+    net_move = price - bars[-1 - speed_window].close  # + = rising, - = falling
+    min_speed = min_speed_pct * price
+    band = approach_band * price
+    overshoot = overshoot_band * price
     day_open = _day_open(bars)
 
     candidates: list[SetupCandidate] = []

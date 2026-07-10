@@ -68,6 +68,41 @@ def test_level_a_few_cents_from_the_open_is_vetoed():
     assert any(c.direction == "put" for c in fired)
 
 
+def test_approach_band_override_admits_wider_approach():
+    # Price 2.0 above support: outside the default 0.3% band, inside 0.5%.
+    bars = walk(ts(9, 30), [503.0, 502.5, 502.0, 501.5, 501.0])
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(bars, [SUPPORT], snap) == []
+    fired = detect_candidates(bars, [SUPPORT], snap, approach_band=0.005)
+    assert any(c.direction == "call" for c in fired)
+
+
+def test_min_speed_pct_override_admits_slow_drift():
+    bars = walk(ts(9, 30), [501.5, 500.5, 499.45, 499.42, 499.40, 499.38, 499.36, 499.35])
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(bars, [SUPPORT], snap) == []
+    fired = detect_candidates(bars, [SUPPORT], snap, min_speed_pct=0.0)
+    assert any(c.direction == "call" for c in fired)
+
+
+def test_speed_window_override_measures_longer_move():
+    # The drop happened 4-5 bars ago; the default 3-bar window misses it.
+    bars = walk(ts(9, 30), [501.0, 500.2, 499.6, 499.5, 499.4, 499.3])
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(bars, [SUPPORT], snap) == []
+    fired = detect_candidates(bars, [SUPPORT], snap, speed_window=5)
+    assert any(c.direction == "call" for c in fired)
+
+
+def test_overshoot_band_override_admits_deeper_poke():
+    # Price 0.7 below support: past the default 0.1% overshoot, inside 0.2%.
+    bars = walk(ts(9, 30), [501.5, 500.6, 499.8, 499.4, 499.0, 498.6, 498.3])
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(bars, [SUPPORT], snap) == []
+    fired = detect_candidates(bars, [SUPPORT], snap, overshoot_band=0.002)
+    assert any(c.direction == "call" for c in fired)
+
+
 def test_premarket_only_bars_skip_the_open_filter():
     # No session bars yet: the day's open is unknown, so the distance filter
     # must be skipped rather than crash or block everything.

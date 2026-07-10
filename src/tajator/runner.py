@@ -144,6 +144,8 @@ class TradingSession:
             bars, prev_high, prev_low,
             min_touch_separation=ctx.settings.double_min_touch_separation_bars,
             min_pullback_pct=ctx.settings.double_min_pullback_pct,
+            swing_window=ctx.settings.swing_window_bars,
+            cluster_tol=ctx.settings.level_cluster_tol_pct,
         )
         snapshot = build_snapshot(ctx.symbol, bars)
         if ctx.use_llm:

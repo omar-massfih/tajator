@@ -124,6 +124,17 @@ def test_missing_stop_vetoes(settings):
     assert not run_check(settings, no_stop).approved
 
 
+def test_stop_band_is_configurable(settings, tmp_path):
+    # 80 cents: outside the default 20–60 rule, inside a widened 10–100 band.
+    far = Decision(action="enter_call", level_price=499.0, stop_price=498.2, reasoning="x")
+    assert not run_check(settings, far).approved
+    wide = Settings(
+        _env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path,
+        stop_min_cents=10, stop_max_cents=100,
+    )
+    assert run_check(wide, far).approved
+
+
 def test_entry_blockers_clear_midday(settings):
     assert entry_blockers(now=MIDDAY, position=None, trades_today=0, settings=settings) == []
 

@@ -107,3 +107,32 @@ def test_dedupe_prefers_stronger_label():
     near = [l for l in levels if abs(l.price - 503.5) < 1.0]
     assert len(near) == 1
     assert near[0].label == "prev_day_high"
+
+
+def test_swing_window_override_changes_required_history():
+    path = (
+        [500 + 0.2 * i for i in range(11)]
+        + [502 - 0.15 * i for i in range(1, 9)]
+        + [500.8 + 0.15 * i for i in range(1, 9)]
+        + [502 - 0.2 * i for i in range(1, 11)]
+    )
+    bars = walk(ts(9, 30), path)
+    assert any(l.label == "double_top" for l in detect_levels(bars))
+    # A much wider swing window needs more session history than exists here.
+    wide = detect_levels(bars, swing_window=15)
+    assert not any(l.label in ("double_top", "swing_high", "swing_low") for l in wide)
+
+
+def test_cluster_tol_override_merges_distant_tops():
+    # Tops at 502 and 504 (~0.4% apart): separate swings by default, one
+    # qualified double when the cluster tolerance is widened.
+    path = (
+        [500 + 0.2 * i for i in range(11)]
+        + [502 - 0.15 * i for i in range(1, 9)]
+        + [500.8 + 0.2 * i for i in range(1, 17)]
+        + [504 - 0.2 * i for i in range(1, 11)]
+    )
+    bars = walk(ts(9, 30), path)
+    assert not any(l.label == "double_top" for l in detect_levels(bars))
+    merged = detect_levels(bars, cluster_tol=0.01)
+    assert any(l.label == "double_top" for l in merged)
