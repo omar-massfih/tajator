@@ -143,7 +143,7 @@ def ensure_option_bars(ib, contract: SelectedContract, day: date, cache_dir: Pat
         return None
     end = datetime.combine(day, datetime.min.time(), tzinfo=ET).replace(hour=20)
     try:
-        opt = ib._option(contract)
+        opt = ib._option(contract, include_expired=True)
     except Exception as exc:  # noqa: BLE001 — expired contracts may fail to qualify
         log.warning("could not qualify %s for %s: %s — no real price available, "
                     "the backtest will abort if this contract must be priced",

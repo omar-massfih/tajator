@@ -276,13 +276,19 @@ class IBBroker(Broker):
         self._chain_cache[symbol] = (today, chain)
         return chain
 
-    def _option(self, contract: SelectedContract) -> Option:
+    def _option(self, contract: SelectedContract, include_expired: bool = False) -> Option:
+        # include_expired is a backtest-only escape hatch: IB won't resolve an
+        # expired option's security definition (needed for its historical bars)
+        # unless the request opts in. Live trading never touches expired
+        # contracts, so it keeps the default and this path stays unchanged.
         key = contract.local_name
         if key not in self._qualified:
             opt = Option(
                 contract.symbol, contract.expiry, contract.strike, contract.right,
                 "SMART", currency="USD",
             )
+            if include_expired:
+                opt.includeExpired = True
             qualified = self.ib.qualifyContracts(opt)
             if not qualified:
                 raise RuntimeError(f"could not qualify option {key}")

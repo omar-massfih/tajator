@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..backtest.data import ET, ensure_option_bars
 from ..models import Bar, SelectedContract
+from .base import ChainParams
 from .stub import StubBroker
 
 # A fill priced from an option bar further than this from the decision time is
@@ -36,6 +37,26 @@ class BacktestBroker(StubBroker):
         self._ib = ib
         self._cache_dir = cache_dir
         self._option_series: dict[tuple, list[Bar] | None] = {}
+
+    def get_option_chain(self, symbol: str) -> ChainParams:
+        """Real listed strikes from IB, but expirations generated mechanically
+        for the *backtest* day.
+
+        StubBroker's default chain uses a half-dollar strike grid; for a symbol
+        like SPY (whole-dollar strikes) that makes the selector pick contracts
+        that were never listed, so every fill fails to price and the backtest
+        aborts. The real strike set comes from IB's chain (cached by day inside
+        IBBroker). Expirations still have to be synthesized — today's chain no
+        longer lists the historical expirations a past session traded — so we
+        keep StubBroker's near-Friday logic anchored on the backtest day."""
+        if self._ib is None:
+            return super().get_option_chain(symbol)
+        strikes = self._ib.get_option_chain(symbol).strikes or self._chain.strikes
+        day = self.now().astimezone(ET).date()
+        friday = day.toordinal() + (4 - day.weekday()) % 7
+        this_friday = datetime.fromordinal(friday).strftime("%Y%m%d")
+        next_friday = datetime.fromordinal(friday + 7).strftime("%Y%m%d")
+        return ChainParams(expirations=[this_friday, next_friday], strikes=sorted(strikes))
 
     def _series_for(self, contract: SelectedContract) -> list[Bar] | None:
         day = self.now().astimezone(ET).date()
