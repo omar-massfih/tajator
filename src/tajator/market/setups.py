@@ -8,6 +8,12 @@ Not every level is tradable: bare swing points are chart context only, and a
 level sitting a few cents from the day's open leaves no room for a move
 (strategy notes 08). The risk gate only admits detected candidates, so
 filtering here is what keeps the LLM from trading those levels.
+
+Speed cuts both ways: the approach must be fast enough to mean something, but
+fading a *very* fast move with a 20-60 cent stop is an overshoot machine — in
+the 2026-07-06..10 backtests every such entry was blown through within two
+bars. Above FAST_APPROACH_SPEED_MULT × the minimum speed, the entry bar must
+show rejection at the level (a wick back in our direction) before it counts.
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ OVERSHOOT_BAND = 0.001  # slight poke through the level still counts
 SPEED_WINDOW = 3  # bars used to measure the move into the level
 MIN_SPEED_PCT = 0.0012  # net move over the window, fraction of price
 MIN_LEVEL_DIST_FROM_OPEN_PCT = 0.003  # ~$1.50 on a $500 name
+FAST_APPROACH_SPEED_MULT = 2.0  # approaches ≥ this × min speed need rejection first
+REJECTION_WICK_MIN_FRAC = 0.25  # wick back off the level, fraction of the bar's range
 
 NON_TRADABLE_LABELS = frozenset({"swing_high", "swing_low"})
 
@@ -45,6 +53,8 @@ def detect_candidates(
     overshoot_band: float = OVERSHOOT_BAND,
     speed_window: int = SPEED_WINDOW,
     min_speed_pct: float = MIN_SPEED_PCT,
+    fast_approach_mult: float = FAST_APPROACH_SPEED_MULT,
+    rejection_wick_frac: float = REJECTION_WICK_MIN_FRAC,
 ) -> list[SetupCandidate]:
     if len(bars) < speed_window + 1:
         return []
@@ -55,6 +65,9 @@ def detect_candidates(
     band = approach_band * price
     overshoot = overshoot_band * price
     day_open = _day_open(bars)
+    # Rejection gate only kicks in above a *measurable* fast threshold —
+    # a min_speed_pct=0 override means "admit slow drifts", not "everything is fast".
+    fast = fast_approach_mult * min_speed if min_speed > 0 and rejection_wick_frac > 0 else None
 
     candidates: list[SetupCandidate] = []
     for level in levels:
@@ -69,6 +82,8 @@ def detect_candidates(
         if level.kind == "support":
             # Call setup: price falling into support from above (or a slight poke below).
             if -overshoot <= diff <= band and net_move <= -min_speed:
+                if fast is not None and -net_move >= fast and not _shows_rejection(bars[-1], "call", rejection_wick_frac):
+                    continue  # fast flush, entry bar closed on its low — no proof the level held
                 candidates.append(
                     SetupCandidate(
                         direction="call",
@@ -81,6 +96,8 @@ def detect_candidates(
         else:
             # Put setup: price rising into resistance from below (or a slight poke above).
             if -overshoot <= -diff <= band and net_move >= min_speed:
+                if fast is not None and net_move >= fast and not _shows_rejection(bars[-1], "put", rejection_wick_frac):
+                    continue  # fast squeeze, entry bar closed on its high — no proof the level held
                 candidates.append(
                     SetupCandidate(
                         direction="put",
@@ -93,3 +110,16 @@ def detect_candidates(
     # Closest level first — that's the trade the LLM should judge.
     candidates.sort(key=lambda c: abs(c.distance))
     return candidates
+
+
+def _shows_rejection(bar: Bar, direction: str, min_frac: float) -> bool:
+    """Did the entry bar wick back off the level in our favor?
+
+    Call at support: price must have closed off the bar's low by at least
+    min_frac of the range (a lower wick — sellers rejected). Put at
+    resistance: closed off the high. A zero-range bar proves nothing."""
+    rng = bar.high - bar.low
+    if rng <= 0:
+        return False
+    wick = bar.close - bar.low if direction == "call" else bar.high - bar.close
+    return wick >= min_frac * rng

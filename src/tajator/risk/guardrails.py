@@ -20,6 +20,25 @@ RTH_OPEN = time(9, 30)
 LEVEL_MATCH_TOL = 0.002  # decision level must be within 0.2% of a detected candidate's
 STOP_MIN_CENTS = 20
 STOP_MAX_CENTS = 60
+STOP_COOLDOWN_MINUTES = 30  # a level that stopped us out is untradable this long
+
+
+def cooldown_filter(
+    candidates: list[SetupCandidate], cooled_levels: list[float]
+) -> tuple[list[SetupCandidate], list[SetupCandidate]]:
+    """Split candidates into (tradable, cooled).
+
+    A level that just stopped us out may not be re-entered until its cooldown
+    lapses: in the 2026-07-06..10 backtests, re-entries at the freshly failed
+    level (1-10 minutes after the stop) accounted for nearly all of the losses.
+    Filtered here rather than in the risk gate so the LLM is never even asked."""
+    if not cooled_levels:
+        return candidates, []
+    kept, dropped = [], []
+    for c in candidates:
+        cooled = any(abs(c.level.price - p) <= LEVEL_MATCH_TOL * c.level.price for p in cooled_levels)
+        (dropped if cooled else kept).append(c)
+    return kept, dropped
 
 
 def entry_blockers(

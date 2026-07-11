@@ -17,12 +17,14 @@ from .market.levels import (
 )
 from .market.setups import (
     APPROACH_BAND,
+    FAST_APPROACH_SPEED_MULT,
     MIN_LEVEL_DIST_FROM_OPEN_PCT,
     MIN_SPEED_PCT,
     OVERSHOOT_BAND,
+    REJECTION_WICK_MIN_FRAC,
     SPEED_WINDOW,
 )
-from .risk.guardrails import STOP_MAX_CENTS, STOP_MIN_CENTS
+from .risk.guardrails import STOP_COOLDOWN_MINUTES, STOP_MAX_CENTS, STOP_MIN_CENTS
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001, 7496}  # 4001 = IB Gateway live, 7496 = TWS live
@@ -75,10 +77,21 @@ class Settings(BaseSettings):
     overshoot_band_pct: float = OVERSHOOT_BAND
     speed_window_bars: int = SPEED_WINDOW
     min_speed_pct: float = MIN_SPEED_PCT
+    fast_approach_speed_mult: float = FAST_APPROACH_SPEED_MULT
+    rejection_wick_min_frac: float = REJECTION_WICK_MIN_FRAC
 
     # Stop-distance rule (defaults live next to the gate in risk/guardrails.py)
     stop_min_cents: int = STOP_MIN_CENTS
     stop_max_cents: int = STOP_MAX_CENTS
+
+    # A level that stopped us out is dead for this long; 0 disables the cooldown.
+    stop_cooldown_minutes: int = STOP_COOLDOWN_MINUTES
+
+    # Stop protecting the runner after the first scale-out: "breakeven" (entry
+    # price — gives the runner room toward hod/lod) or "first_target" (the
+    # strategy notes' tighter lock; in backtests it ended every runner within
+    # two bars of the scale-out, so breakeven is the default).
+    runner_stop: Literal["breakeven", "first_target"] = "breakeven"
 
     # Telegram trade notifications (optional — leave blank to disable)
     telegram_bot_token: str = ""

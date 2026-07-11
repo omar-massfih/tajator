@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     # injected each tick from the session
     position: OpenPosition | None
     trades_today: int
+    cooldown_levels: list[float]  # levels under a stop-out cooldown — not tradable
     # built by the graph
     bars: list[Bar]
     prev_day_high: float | None

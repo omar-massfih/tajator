@@ -119,3 +119,57 @@ def test_two_symbol_sessions_keep_independent_state(tmp_path):
     content = "\n".join(f.read_text() for f in tmp_path.glob("journal-*.jsonl"))
     assert '"symbol": "SPY"' in content
     assert '"symbol": "AAPL"' in content
+
+
+# --- stop-out cooldown -------------------------------------------------------
+# A scripted day where price falls into the prev-day low (499), stops out,
+# bounces, and falls into the SAME level again minutes later. With the default
+# cooldown the second approach must not re-arm; with the cooldown disabled it
+# re-enters — proving the veto (not the detector) is what blocks it.
+
+from tajator.broker.stub import StubBroker as _StubBroker  # noqa: E402
+
+from conftest import ts, walk  # noqa: E402
+
+
+def _cooldown_day():
+    closes = (
+        [503.0] * 5 + [502.8] * 5            # 09:30-09:39 warmup
+        + [502.5, 502.0, 501.6, 501.2, 500.8, 500.45]  # fall into 499 -> entry 09:45
+        + [499.9, 499.3, 498.55]             # through the 498.6 stop at 09:48
+        + [499.4, 500.1, 500.7, 501.2]       # bounce away
+        + [501.0, 500.6, 500.2, 499.9, 499.6]  # second approach ~09:55 (inside cooldown)
+        + [499.5] * 3
+    )
+    return walk(ts(9, 30), closes)
+
+
+def _cooldown_session(tmp_path, cooldown_minutes):
+    settings = Settings(
+        _env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path,
+        stop_cooldown_minutes=cooldown_minutes,
+    )
+    broker = _StubBroker(_cooldown_day(), prev_day_high=510.0, prev_day_low=499.0)
+    ctx = RuntimeContext(
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+    )
+    return TradingSession(ctx), broker
+
+
+def test_stopped_out_level_is_cooled_down(tmp_path):
+    sess, broker = _cooldown_session(tmp_path, cooldown_minutes=30)
+    sess.run_replay(broker, verbose=False)
+
+    buys = [f for f in broker.fills if f[0] == "BUY"]
+    assert len(buys) == 1, "the cooled level must not re-arm"
+    assert sess.trades_today == 1
+    content = next(tmp_path.glob("journal-*.jsonl")).read_text()
+    assert '"cooldown_veto"' in content, "the dropped re-entry must be journaled"
+
+
+def test_cooldown_disabled_re_enters_the_same_level(tmp_path):
+    sess, broker = _cooldown_session(tmp_path, cooldown_minutes=0)
+    sess.run_replay(broker, verbose=False)
+
+    buys = [f for f in broker.fills if f[0] == "BUY"]
+    assert len(buys) == 2, "without the cooldown the second approach re-enters"

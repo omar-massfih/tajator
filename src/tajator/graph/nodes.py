@@ -188,7 +188,20 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             overshoot_band=settings.overshoot_band_pct,
             speed_window=settings.speed_window_bars,
             min_speed_pct=settings.min_speed_pct,
+            fast_approach_mult=settings.fast_approach_speed_mult,
+            rejection_wick_frac=settings.rejection_wick_min_frac,
         )
+        # Levels under a stop-out cooldown are dropped before the LLM ever
+        # sees them — and since risk_gate only admits detected candidates,
+        # the LLM cannot re-enter them either.
+        candidates, cooled = guardrails.cooldown_filter(
+            candidates, state.get("cooldown_levels") or []
+        )
+        if cooled:
+            ctx.journal.write(
+                "cooldown_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                dropped=cooled, cooldown_levels=state.get("cooldown_levels"),
+            )
         if not candidates:
             return {"candidates": candidates}
         ctx.journal.write(

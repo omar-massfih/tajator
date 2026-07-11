@@ -12,7 +12,7 @@ from tajator.models import (
     SelectedContract,
     SetupCandidate,
 )
-from tajator.risk.guardrails import check, entry_blockers
+from tajator.risk.guardrails import check, cooldown_filter, entry_blockers
 
 ET = ZoneInfo("America/New_York")
 MIDDAY = datetime(2026, 7, 6, 11, 0, tzinfo=ET)  # Monday 11:00 ET
@@ -148,3 +148,22 @@ def test_entry_blockers_collects_cheap_vetoes(settings):
         settings=settings,
     )
     assert len(blockers) == 4  # kill switch, time window, max trades, open position
+
+
+def test_cooldown_filter_drops_the_stopped_out_level():
+    other = SetupCandidate(
+        direction="put",
+        level=Level(price=502.0, kind="resistance", label="double_top"),
+        distance=0.2,
+        speed=0.8,
+    )
+    # 499.5 is within LEVEL_MATCH_TOL (0.2% ~ $1) of the 499.0 candidate —
+    # a re-formed double at a slightly different print must still be cooled.
+    kept, dropped = cooldown_filter([CANDIDATE, other], [499.5])
+    assert kept == [other]
+    assert dropped == [CANDIDATE]
+
+
+def test_cooldown_filter_without_cooled_levels_keeps_everything():
+    kept, dropped = cooldown_filter([CANDIDATE], [])
+    assert kept == [CANDIDATE] and dropped == []

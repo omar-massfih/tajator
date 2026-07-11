@@ -88,9 +88,10 @@ def test_scale_out_is_cancel_then_sell_then_replace(tmp_path):
     assert broker.stop_calls == [("place", first), ("cancel", first), ("place", first + 1)]
     assert position.protective_stop.order_id == first + 1
     assert position.protective_stop.qty == position.qty_remaining, "resized to the remainder"
-    assert position.protective_stop.stop_price == snap.price
+    # break-even after profit: here entry and scale-out share the same snapshot
+    assert position.protective_stop.stop_price == position.plan.entry_equity_price
     assert position.profit_taken is True
-    assert position.profit_lock_price == snap.price
+    assert position.profit_lock_price is None  # RUNNER_STOP=breakeven default
 
 
 def test_exit_cancels_and_does_not_replace_at_zero(tmp_path):

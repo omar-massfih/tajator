@@ -73,6 +73,10 @@ class TradingSession:
         self.trades_today: int = restored.trades_today if restored else 0
         # restored state is valid for `day` — start_new_day must not wipe it
         self._day: date | None = day if restored else None
+        # (level_price, stopped_at) of recent stop-outs; those levels are
+        # untradable for STOP_COOLDOWN_MINUTES. Not persisted: a mid-day
+        # restart forgets cooldowns, which only risks one extra entry.
+        self._stop_cooldowns: list[tuple[float, datetime]] = []
 
     def start_new_day(self, day: date | None = None) -> None:
         """Reset per-day state once per calendar day; an overnight position
@@ -83,7 +87,19 @@ class TradingSession:
             return
         self._day = day
         self.trades_today = 0
+        self._stop_cooldowns = []
         self._persist()
+
+    def _active_cooldown_levels(self) -> list[float]:
+        minutes = self.ctx.settings.stop_cooldown_minutes
+        if minutes <= 0 or not self._stop_cooldowns:
+            return []
+        now = self.ctx.broker.now()
+        self._stop_cooldowns = [
+            (price, at) for price, at in self._stop_cooldowns
+            if now < at + timedelta(minutes=minutes)
+        ]
+        return [price for price, _ in self._stop_cooldowns]
 
     def _persist(self) -> None:
         if self.store is None:  # replay/backtest/prep never persist
@@ -92,10 +108,21 @@ class TradingSession:
         self.store.update(self.ctx.symbol, self.position, self.trades_today, day)
 
     def tick(self) -> AgentState:
-        state: AgentState = {"position": self.position, "trades_today": self.trades_today}
+        state: AgentState = {
+            "position": self.position,
+            "trades_today": self.trades_today,
+            "cooldown_levels": self._active_cooldown_levels(),
+        }
+        stopped_from = self.position  # the plan whose stop could fire this tick
         out = self.graph.invoke(state)
         self.position = out.get("position")
         self.trades_today = out.get("trades_today", self.trades_today)
+        if stopped_from is not None and any(
+            a.kind == "stop_exit" for a in out.get("actions", [])
+        ):
+            self._stop_cooldowns.append(
+                (stopped_from.plan.level_price, self.ctx.broker.now())
+            )
         self._persist()
         return out
 

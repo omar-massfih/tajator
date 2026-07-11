@@ -143,7 +143,10 @@ def execute_scale_out(
         if fill.qty == qty:
             position.pieces_sold += 1  # a partially sold piece is retried on the next signal
         if fill.qty > 0:
-            if not position.profit_taken:
+            # RUNNER_STOP=first_target locks the scale-out price; the default
+            # leaves profit_lock_price unset so active_stop falls back to
+            # break-even and the runner keeps room toward hod/lod.
+            if not position.profit_taken and settings.runner_stop == "first_target":
                 position.profit_lock_price = snapshot.price
             position.profit_taken = True
         position.qty_remaining -= fill.qty

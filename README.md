@@ -12,7 +12,11 @@ The strategy in one line: buy **calls** as price moves down into support, buy **
 as price moves up into resistance (incl. double tops/bottoms), mental stop ~40 cents
 beyond the level on the equity, use EMA9 as chart context only, scale out in
 pieces at the 50 EMA/VWAP → high/low of day, and protect the final runner at
-the first target.
+break-even (`RUNNER_STOP=first_target` restores the notes' tighter lock at the
+first target). Two discipline gates added after the first live-data backtests:
+a level that stops us out is untradable for `STOP_COOLDOWN_MINUTES`, and a
+*very* fast approach must print a rejection wick on the entry bar before it
+can become a candidate.
 
 ## Design: the LLM proposes, code disposes
 

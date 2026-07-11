@@ -76,13 +76,22 @@ def test_scale_and_exit_bookkeeping():
     assert a.kind == "scale_out"
     assert position.pieces_sold == 1
     assert position.qty_remaining == start_qty - a.qty
-    assert position.profit_lock_price == snap.price
+    assert position.profit_taken is True
+    assert position.profit_lock_price is None  # RUNNER_STOP=breakeven default
 
     [a] = execute_exit(broker, settings, position, snap, "stop_exit", "stop hit")
     assert position.qty_remaining == 0
     assert a.qty == start_qty - position.plan.pieces[0]
     sells = [f for f in broker.fills if f[0] == "SELL"]
     assert sum(f[2].qty for f in sells) == start_qty
+
+
+def test_first_target_runner_stop_locks_the_scale_price():
+    _, broker, snap, decision = entry_setup()
+    settings = Settings(_env_file=None, runner_stop="first_target")
+    position, _, _ = execute_entry(broker, settings, decision, "call", snap)
+    execute_scale_out(broker, settings, position, snap, "ema50 target")
+    assert position.profit_lock_price == snap.price
 
 
 class PartialFillBroker(StubBroker):
