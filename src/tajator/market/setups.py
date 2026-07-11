@@ -30,6 +30,22 @@ FAST_APPROACH_SPEED_MULT = 2.0  # approaches ≥ this × min speed need rejectio
 REJECTION_WICK_MIN_FRAC = 0.25  # wick back off the level, fraction of the bar's range
 
 NON_TRADABLE_LABELS = frozenset({"swing_high", "swing_low"})
+TRADE_FLIPPED_LEVELS = False  # role-reversed levels (broken support as resistance, ...) don't trade
+
+# The side each level formed on. When its current kind (which follows price)
+# disagrees, price has already broken through it — "fading the reclaim" of a
+# broken level is a momentum bet, not the notes' S/R fade, and it was the
+# worst-performing entry class in the 2026-07-06..10 backtests.
+NATURAL_KIND = {
+    "prev_day_high": "resistance",
+    "premarket_high": "resistance",
+    "double_top": "resistance",
+    "swing_high": "resistance",
+    "prev_day_low": "support",
+    "premarket_low": "support",
+    "double_bottom": "support",
+    "swing_low": "support",
+}
 
 
 def _day_open(bars: list[Bar]) -> float | None:
@@ -55,6 +71,7 @@ def detect_candidates(
     min_speed_pct: float = MIN_SPEED_PCT,
     fast_approach_mult: float = FAST_APPROACH_SPEED_MULT,
     rejection_wick_frac: float = REJECTION_WICK_MIN_FRAC,
+    trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS,
 ) -> list[SetupCandidate]:
     if len(bars) < speed_window + 1:
         return []
@@ -73,6 +90,10 @@ def detect_candidates(
     for level in levels:
         if level.label in NON_TRADABLE_LABELS:
             continue
+        if not trade_flipped_levels:
+            natural = NATURAL_KIND.get(level.label)
+            if natural is not None and level.kind != natural:
+                continue  # broken level retested from the other side — chart context only
         if (
             day_open is not None
             and abs(level.price - day_open) < min_dist_from_open_pct * day_open

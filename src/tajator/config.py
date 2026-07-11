@@ -23,6 +23,7 @@ from .market.setups import (
     OVERSHOOT_BAND,
     REJECTION_WICK_MIN_FRAC,
     SPEED_WINDOW,
+    TRADE_FLIPPED_LEVELS,
 )
 from .risk.guardrails import STOP_COOLDOWN_MINUTES, STOP_MAX_CENTS, STOP_MIN_CENTS
 
@@ -79,6 +80,9 @@ class Settings(BaseSettings):
     min_speed_pct: float = MIN_SPEED_PCT
     fast_approach_speed_mult: float = FAST_APPROACH_SPEED_MULT
     rejection_wick_min_frac: float = REJECTION_WICK_MIN_FRAC
+    # Role-reversed levels (a broken support retested as resistance, and vice
+    # versa) are chart context, not trades — the worst entry class in backtests.
+    trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS
 
     # Stop-distance rule (defaults live next to the gate in risk/guardrails.py)
     stop_min_cents: int = STOP_MIN_CENTS

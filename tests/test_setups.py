@@ -137,3 +137,26 @@ def test_premarket_only_bars_skip_the_open_filter():
     snap = build_snapshot("SPY", bars)
     cands = detect_candidates(bars, [SUPPORT], snap)
     assert any(c.direction == "call" for c in cands)
+
+
+def test_flipped_level_is_chart_context_not_a_trade():
+    # Price broke below the premarket low and is now rising back into it:
+    # the level's kind flipped to resistance. Fading that reclaim is a
+    # momentum bet, not the notes' S/R fade — no candidate by default.
+    flipped = Level(price=502.0, kind="resistance", label="premarket_low")
+    bars = walk(ts(9, 30), [500.0, 500.3, 500.5, 501.0, 501.5])
+    bars.append(make_bar(ts(9, 35), 501.8, o=501.5, h=502.0, lo=501.5))
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(bars, [flipped], snap) == []
+    # ...the TRADE_FLIPPED_LEVELS override re-admits it
+    fired = detect_candidates(bars, [flipped], snap, trade_flipped_levels=True)
+    assert any(c.direction == "put" for c in fired)
+
+
+def test_natural_role_level_still_trades():
+    # Same approach into a level whose kind matches its natural side.
+    natural = Level(price=502.0, kind="resistance", label="premarket_high")
+    bars = walk(ts(9, 30), [500.0, 500.3, 500.5, 501.0, 501.5])
+    bars.append(make_bar(ts(9, 35), 501.8, o=501.5, h=502.0, lo=501.5))
+    snap = build_snapshot("SPY", bars)
+    assert any(c.direction == "put" for c in detect_candidates(bars, [natural], snap))

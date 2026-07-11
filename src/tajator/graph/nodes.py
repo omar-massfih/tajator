@@ -190,6 +190,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             min_speed_pct=settings.min_speed_pct,
             fast_approach_mult=settings.fast_approach_speed_mult,
             rejection_wick_frac=settings.rejection_wick_min_frac,
+            trade_flipped_levels=settings.trade_flipped_levels,
         )
         # Levels under a stop-out cooldown are dropped before the LLM ever
         # sees them — and since risk_gate only admits detected candidates,
