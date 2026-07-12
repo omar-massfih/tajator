@@ -77,6 +77,9 @@ uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
     --prev-high 503.5 --prev-low 497.0   # bundled synthetic day, no IB/LLM needed
 uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay with the LLM
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-llm
+uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
+    --no-llm --underlying-only --experiment baseline  # long-window signal research
+uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_risk-cap.json
 uv run tajator run          # live minute loop (paper) during market hours
 uv run pytest                     # full test suite
 ```
@@ -117,6 +120,25 @@ the day's forced flatten uses the last bar's close. It prints an aggregate win-r
 writes a per-trade ledger + daily equity curve to
 `logs/backtests/<symbol>_<start>_<end>.json`. Known limitation: no market-holiday
 calendar (holidays are just days with no bars, silently skipped).
+
+Backtest fills include a configurable adverse half-spread, slippage, and
+commission model (see `BACKTEST_*` in `.env.example`). Reports preserve the
+exact strategy settings, execution assumptions, LLM mode, and git revision,
+and separate gross PnL, fees, and net PnL. Each trade also records profit
+factor inputs, return on premium, planned underlying stop distance, exit
+reason, and underlying maximum favorable/adverse excursion over its lifetime.
+
+`--underlying-only` replays the identical detector, risk gates, stops, and
+targets using historical stock bars and reports direction-adjusted underlying
+points. It is a signal-quality research mode, not an options-PnL simulation.
+Use it for long windows where IB no longer exposes expired option contracts.
+`--skip-missing-option-data` instead retains real-option mode but excludes and
+reports an entire day if any required option fill is unavailable.
+Every new report carries an experiment label and configuration fingerprint in
+both its filename and metadata, so variants cannot overwrite one another.
+Symbol-specific strategy overrides, actual entry-to-stop caps, opening-window
+confirmation, ATR stops, regime filters, and level-quality filters are typed
+settings documented in `.env.example`; all remain disabled by default.
 
 ## Safety
 

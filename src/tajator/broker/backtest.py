@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..backtest.data import ET, ensure_option_bars
 from ..models import Bar, SelectedContract
-from .base import ChainParams
+from .base import ChainParams, Fill
 from .stub import StubBroker
 
 # A fill priced from an option bar further than this from the decision time is
@@ -32,11 +32,19 @@ class BacktestBroker(StubBroker):
         *,
         ib=None,
         cache_dir: Path | None = None,
+        half_spread_pct: float = 0.0,
+        slippage_cents: float = 0.0,
+        commission_per_contract: float = 0.0,
+        min_commission_per_order: float = 0.0,
     ):
         super().__init__(bars, prev_day_high, prev_day_low)
         self._ib = ib
         self._cache_dir = cache_dir
         self._option_series: dict[tuple, list[Bar] | None] = {}
+        self.half_spread_pct = half_spread_pct
+        self.slippage_cents = slippage_cents
+        self.commission_per_contract = commission_per_contract
+        self.min_commission_per_order = min_commission_per_order
 
     def get_option_chain(self, symbol: str) -> ChainParams:
         """Real listed strikes from IB, but expirations generated mechanically
@@ -95,3 +103,18 @@ class BacktestBroker(StubBroker):
                 "cannot price this fill from real data, aborting backtest"
             )
         return round(price, 2)
+
+    def _execution_fill(self, contract: SelectedContract, qty: int, side: str) -> Fill:
+        reference = self.get_option_premium(contract)
+        adverse = reference * self.half_spread_pct + self.slippage_cents / 100
+        premium = reference + adverse if side == "BUY" else max(0.01, reference - adverse)
+        fee = max(self.min_commission_per_order, qty * self.commission_per_contract)
+        fill = Fill(premium=round(premium, 2), qty=qty, ts=self.now(), fee=round(fee, 2))
+        self.fills.append((side, contract, fill))
+        return fill
+
+    def buy_option(self, contract: SelectedContract, qty: int) -> Fill:
+        return self._execution_fill(contract, qty, "BUY")
+
+    def sell_option(self, contract: SelectedContract, qty: int) -> Fill:
+        return self._execution_fill(contract, qty, "SELL")

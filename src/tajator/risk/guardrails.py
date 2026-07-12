@@ -62,9 +62,10 @@ def entry_blockers(
         )
     if now_et.weekday() >= 5:
         violations.append("market closed (weekend)")
-    if not (RTH_OPEN <= now_et.time() <= settings.no_new_entries_after):
+    if not (settings.no_new_entries_before <= now_et.time() <= settings.no_new_entries_after):
         violations.append(
-            f"entries allowed only 09:30–{settings.no_new_entries_after:%H:%M} ET (now {now_et:%H:%M})"
+            f"entries allowed only {settings.no_new_entries_before:%H:%M}–"
+            f"{settings.no_new_entries_after:%H:%M} ET (now {now_et:%H:%M})"
         )
     if trades_today >= settings.max_trades_per_day:
         violations.append(f"max {settings.max_trades_per_day} trades/day reached")
@@ -82,6 +83,7 @@ def check(
     candidates: list[SetupCandidate],
     settings: Settings,
     delayed_data: bool = False,
+    snapshot_price: float | None = None,
 ) -> RiskVerdict:
     if decision.action in ("wait", "scale_out", "exit"):
         return RiskVerdict(approved=True)
@@ -99,6 +101,19 @@ def check(
         )
 
     violations.extend(_stop_violations(decision, direction, settings))
+    if (
+        settings.max_entry_to_stop_cents is not None
+        and decision.stop_price is not None
+        and snapshot_price is not None
+    ):
+        # Candidate matching anchors the level; actual risk is measured from
+        # the current underlying price, not merely from level to stop.
+        matched_risk = abs(snapshot_price - decision.stop_price)
+        if matched_risk is not None and matched_risk > settings.max_entry_to_stop_cents / 100:
+            violations.append(
+                f"actual entry-to-stop risk {matched_risk:.2f} exceeds "
+                f"{settings.max_entry_to_stop_cents / 100:.2f} maximum"
+            )
 
     # MAX_PREMIUM_USD is enforced at execution: size_entry sizes the order down
     # to fit the budget and skips the entry if even one contract busts it.

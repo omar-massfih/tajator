@@ -160,3 +160,32 @@ def test_natural_role_level_still_trades():
     bars.append(make_bar(ts(9, 35), 501.8, o=501.5, h=502.0, lo=501.5))
     snap = build_snapshot("SPY", bars)
     assert any(c.direction == "put" for c in detect_candidates(bars, [natural], snap))
+
+
+def test_touch_rejection_blocks_early_entry_above_support():
+    bars = walk(ts(9, 30), [501.5, 501.2, 500.9, 500.2, 499.7])
+    bars.append(make_bar(ts(9, 35), 499.4, o=499.7, h=499.7, lo=499.1))
+    snap = build_snapshot("SPY", bars)
+    assert detect_candidates(
+        bars, [SUPPORT], snap, entry_confirmation="touch_rejection"
+    ) == []
+
+
+def test_touch_rejection_accepts_support_pierce_and_reclaim():
+    bars = walk(ts(9, 30), [501.5, 501.2, 500.9, 500.2, 499.7])
+    bars.append(make_bar(ts(9, 35), 499.2, o=499.7, h=499.7, lo=498.9))
+    snap = build_snapshot("SPY", bars)
+    fired = detect_candidates(
+        bars, [SUPPORT], snap, entry_confirmation="touch_rejection"
+    )
+    assert any(c.direction == "call" for c in fired)
+
+
+def test_touch_rejection_accepts_resistance_touch_and_reject():
+    bars = walk(ts(9, 30), [500.0, 500.3, 500.5, 501.0, 501.5])
+    bars.append(make_bar(ts(9, 35), 501.8, o=501.5, h=502.1, lo=501.5))
+    snap = build_snapshot("SPY", bars)
+    fired = detect_candidates(
+        bars, [RESISTANCE], snap, entry_confirmation="touch_rejection"
+    )
+    assert any(c.direction == "put" for c in fired)

@@ -68,7 +68,9 @@ def ensure_underlying_bars(ib, symbol: str, day: date, cache_dir: Path) -> list[
     """1-min underlying bars for one session, cached to disk after the first fetch."""
     path = _underlying_cache_path(cache_dir, symbol, day)
     if path.exists():
-        return _read_csv(path)
+        # IB may answer a holiday request with the preceding session. Never
+        # replay those bars under the requested date.
+        return [b for b in _read_csv(path) if b.ts.astimezone(ET).date() == day]
     if ib is None:
         return []
     end = datetime.combine(day, datetime.min.time(), tzinfo=ET).replace(hour=20)
@@ -88,6 +90,7 @@ def ensure_underlying_bars(ib, symbol: str, day: date, cache_dir: Path) -> list[
             volume=float(b.volume) if b.volume else 0.0,
         )
         for b in raw
+        if b.date.astimezone(ET).date() == day
     ]
     if bars:
         _write_csv(path, bars)

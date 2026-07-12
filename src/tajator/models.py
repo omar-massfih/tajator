@@ -54,6 +54,8 @@ class SetupCandidate(BaseModel):
     distance: float  # dollars between current price and the level
     speed: float  # net move over the approach window, in dollars
     note: str = ""
+    regime: str = "unknown"
+    quality_score: float = 0.0
 
 
 class Snapshot(BaseModel):
@@ -67,6 +69,11 @@ class Snapshot(BaseModel):
     vwap: float | None = None
     hod: float | None = None
     lod: float | None = None
+    atr: float | None = None
+    vwap_slope_5: float | None = None
+    vwap_slope_15: float | None = None
+    closes_above_vwap_frac: float | None = None
+    regime: str = "unknown"
 
 
 class Decision(BaseModel):

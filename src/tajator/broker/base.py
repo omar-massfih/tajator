@@ -20,6 +20,12 @@ class Fill(BaseModel):
     premium: float  # per-contract option price
     qty: int  # contracts actually filled — may be less than requested
     ts: datetime
+    fee: float = 0.0  # total commissions/fees for this fill, in dollars
+    equity_price: float | None = None
+    stop_price: float | None = None
+    exit_reason: str = ""
+    regime: str = "unknown"
+    level_quality_score: float = 0.0
 
 
 class BrokerOptionPosition(BaseModel):

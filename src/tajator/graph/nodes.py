@@ -40,6 +40,7 @@ class RuntimeContext:
     notifier: Notifier = field(default_factory=NullNotifier)
     _llm: Any = field(default=None, repr=False)
     _prep_llm: Any = field(default=None, repr=False)
+    metrics: dict[str, int] = field(default_factory=dict)
 
     @property
     def llm(self) -> Any:
@@ -55,7 +56,7 @@ class RuntimeContext:
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
-    settings = ctx.settings
+    settings = ctx.settings.for_symbol(ctx.symbol)
 
     def fetch_data(state: AgentState) -> dict:
         bars = ctx.broker.get_bars(ctx.symbol)
@@ -66,7 +67,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         bars = state["bars"]
         if not bars:
             raise RuntimeError("broker returned no bars (data farm down or market closed)")
-        snapshot = build_snapshot(ctx.symbol, bars)
+        snapshot = build_snapshot(ctx.symbol, bars, atr_window=settings.atr_window_bars)
         levels = detect_levels(
             bars, state.get("prev_day_high"), state.get("prev_day_low"),
             min_touch_separation=settings.double_min_touch_separation_bars,
@@ -181,6 +182,10 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     # ----- flat branch --------------------------------------------------------
 
     def detect_setups(state: AgentState) -> dict:
+        now_et = state["snapshot"].ts.astimezone(guardrails.ET).time()
+        confirmation = settings.entry_confirmation
+        if settings.opening_confirmation_until and now_et < settings.opening_confirmation_until:
+            confirmation = "touch_rejection"
         candidates = detect_candidates(
             state["bars"], state["levels"], state["snapshot"],
             min_dist_from_open_pct=settings.min_level_dist_from_open_pct,
@@ -191,7 +196,52 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             fast_approach_mult=settings.fast_approach_speed_mult,
             rejection_wick_frac=settings.rejection_wick_min_frac,
             trade_flipped_levels=settings.trade_flipped_levels,
+            entry_confirmation=confirmation,
         )
+        if candidates:
+            ctx.journal.write(
+                "candidate_features", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                candidates=candidates, regime=state["snapshot"].regime,
+                atr=state["snapshot"].atr,
+            )
+        filtered: list[tuple[Any, str]] = []
+        if settings.allowed_regimes:
+            kept = []
+            for c in candidates:
+                if c.regime in settings.allowed_regimes:
+                    kept.append(c)
+                else:
+                    filtered.append((c, f"regime {c.regime} not allowed"))
+            candidates = kept
+        if settings.blocked_direction_regimes:
+            blocked = set(settings.blocked_direction_regimes)
+            kept = []
+            for c in candidates:
+                key = f"{c.direction}:{c.regime}"
+                if key in blocked:
+                    filtered.append((c, f"direction/regime {key} blocked"))
+                else:
+                    kept.append(c)
+            candidates = kept
+        if settings.min_level_quality_score is not None:
+            kept = []
+            for c in candidates:
+                if c.quality_score >= settings.min_level_quality_score:
+                    kept.append(c)
+                else:
+                    filtered.append((c, f"quality {c.quality_score} below minimum"))
+            candidates = kept
+        if filtered:
+            for _, reason in filtered:
+                if reason.startswith("direction/regime"):
+                    key = "direction_regime"
+                else:
+                    key = "regime" if reason.startswith("regime") else "quality"
+                ctx.metrics[key] = ctx.metrics.get(key, 0) + 1
+            ctx.journal.write(
+                "strategy_filter_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                dropped=[{"candidate": c, "reason": reason} for c, reason in filtered],
+            )
         # Levels under a stop-out cooldown are dropped before the LLM ever
         # sees them — and since risk_gate only admits detected candidates,
         # the LLM cannot re-enter them either.
@@ -219,6 +269,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             delayed_data=ctx.broker.is_delayed_data,
         )
         if blockers:
+            ctx.metrics["entry_blocker"] = ctx.metrics.get("entry_blocker", 0) + 1
             ctx.journal.write(
                 "entry_pre_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
                 candidates=candidates, violations=blockers,
@@ -230,6 +281,11 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         if not ctx.use_llm:
             c = candidates[0]
             buffer = settings.stop_buffer_cents / 100
+            if settings.stop_atr_multiplier is not None and snapshot.atr is not None:
+                buffer = min(
+                    settings.stop_max_cents / 100,
+                    max(settings.stop_min_cents / 100, snapshot.atr * settings.stop_atr_multiplier),
+                )
             stop = c.level.price - buffer if c.direction == "call" else c.level.price + buffer
             decision = Decision(
                 action=f"enter_{c.direction}", level_price=c.level.price, stop_price=round(stop, 2),
@@ -244,6 +300,21 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
                 decision = decide_entry(ctx.llm, text)
             except Exception as exc:  # noqa: BLE001 — e.g. missing API key at LLM construction
                 decision = Decision(action="wait", reasoning=f"LLM unavailable ({exc}); waiting")
+        if (
+            decision.action in ("enter_call", "enter_put")
+            and decision.level_price is not None
+            and settings.stop_atr_multiplier is not None
+            and snapshot.atr is not None
+        ):
+            buffer = min(
+                settings.stop_max_cents / 100,
+                max(settings.stop_min_cents / 100, snapshot.atr * settings.stop_atr_multiplier),
+            )
+            stop = (
+                decision.level_price - buffer
+                if decision.action == "enter_call" else decision.level_price + buffer
+            )
+            decision = decision.model_copy(update={"stop_price": round(stop, 2)})
         ctx.journal.write("llm_decision", ts=snapshot.ts, symbol=ctx.symbol, mode="entry", decision=decision)
         return {"decision": decision}
 
@@ -256,8 +327,12 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             candidates=state["candidates"],
             settings=settings,
             delayed_data=ctx.broker.is_delayed_data,
+            snapshot_price=state["snapshot"].price,
         )
         if not verdict.approved:
+            ctx.metrics["risk_veto"] = ctx.metrics.get("risk_veto", 0) + 1
+            if any("actual entry-to-stop risk" in v for v in verdict.violations):
+                ctx.metrics["actual_risk"] = ctx.metrics.get("actual_risk", 0) + 1
             ctx.journal.write(
                 "risk_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
                 decision=state["decision"], violations=verdict.violations,
@@ -267,8 +342,18 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def do_entry(state: AgentState) -> dict:
         decision, snapshot = state["decision"], state["snapshot"]
         direction = "call" if decision.action == "enter_call" else "put"
+        candidate = next(
+            (
+                c for c in state["candidates"]
+                if c.direction == direction and decision.level_price is not None
+                and abs(c.level.price - decision.level_price) <= guardrails.LEVEL_MATCH_TOL * c.level.price
+            ),
+            None,
+        )
         try:
-            position, action, skip = execute_entry(ctx.broker, settings, decision, direction, snapshot)
+            position, action, skip = execute_entry(
+                ctx.broker, settings, decision, direction, snapshot, candidate=candidate
+            )
         except OrderFailed as exc:
             # An order reached IB, so the attempt consumes a trade — otherwise a
             # setup that keeps firing would loop a new order every minute (this

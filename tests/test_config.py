@@ -103,3 +103,35 @@ def test_setup_and_stop_fields_parse_env_strings():
     assert settings.speed_window_bars == 5
     assert settings.stop_min_cents == 10
     assert settings.stop_max_cents == 80
+
+
+def test_backtest_execution_costs_must_be_nonnegative():
+    with pytest.raises(ValidationError, match="cannot be negative"):
+        Settings(_env_file=None, backtest_slippage_cents=-0.01)
+
+
+def test_symbol_strategy_override_resolves_without_mutating_global():
+    settings = Settings(
+        _env_file=None,
+        entry_confirmation="immediate",
+        symbol_strategy_overrides={
+            "aapl": {
+                "entry_confirmation": "touch_rejection",
+                "max_entry_to_stop_cents": 90,
+                "no_new_entries_after": "14:00",
+                "blocked_direction_regimes": ["put:trend_up"],
+            }
+        },
+    )
+    aapl = settings.for_symbol("AAPL")
+    assert aapl.entry_confirmation == "touch_rejection"
+    assert aapl.max_entry_to_stop_cents == 90
+    assert aapl.no_new_entries_after.hour == 14
+    assert aapl.blocked_direction_regimes == ["put:trend_up"]
+    assert settings.entry_confirmation == "immediate"
+    assert settings.for_symbol("MSFT") is settings
+
+
+def test_invalid_direction_regime_block_is_rejected():
+    with pytest.raises(ValidationError, match="invalid direction/regime"):
+        Settings(_env_file=None, blocked_direction_regimes=["put:sideways"])

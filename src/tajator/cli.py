@@ -53,6 +53,22 @@ def main() -> None:
     backtest.add_argument("--end", required=True, help="YYYY-MM-DD")
     backtest.add_argument("--no-llm", action="store_true", help="deterministic rule-follower instead of the LLM")
     backtest.add_argument("--cache-dir", type=Path, default=None, help="defaults to Settings.backtest_cache_dir")
+    backtest.add_argument(
+        "--skip-missing-option-data", action="store_true",
+        help="exclude an entire day when any required historical option fill is unavailable",
+    )
+    backtest.add_argument(
+        "--underlying-only", action="store_true",
+        help="research signal outcomes using stock-price moves; no historical option data required",
+    )
+    backtest.add_argument(
+        "--cached-only", action="store_true",
+        help="never fetch missing historical bars; replay only files already in the cache",
+    )
+    backtest.add_argument("--experiment", default="baseline", help="report/journal experiment label")
+
+    compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
+    compare.add_argument("reports", nargs="+", type=Path)
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -67,6 +83,9 @@ def main() -> None:
         cmd_prep()
     elif args.command == "backtest":
         cmd_backtest(args)
+    elif args.command == "backtest-compare":
+        from .backtest.compare import print_comparison
+        print_comparison(args.reports)
     else:
         cmd_replay(args)
 
@@ -365,7 +384,11 @@ def cmd_backtest(args) -> None:
     cache_dir = args.cache_dir or settings.backtest_cache_dir
     try:
         report = run_backtest(
-            symbol, start, end, settings, use_llm=not args.no_llm, ib=ib, cache_dir=cache_dir
+            symbol, start, end, settings, use_llm=not args.no_llm, ib=ib, cache_dir=cache_dir,
+            skip_missing_option_data=args.skip_missing_option_data,
+            underlying_only=args.underlying_only,
+            cached_only=args.cached_only,
+            experiment=args.experiment,
         )
     except Exception as exc:  # noqa: BLE001 — e.g. bad LLM config; fail with a clean message
         ib.disconnect()

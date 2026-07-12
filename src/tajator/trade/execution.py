@@ -8,7 +8,7 @@ from typing import Literal
 
 from ..broker.base import Broker
 from ..config import Settings
-from ..models import Decision, Direction, ExecutedAction, OpenPosition, Snapshot
+from ..models import Decision, Direction, ExecutedAction, OpenPosition, SetupCandidate, Snapshot
 from .contracts import select_contract
 from .position import active_stop_price, build_plan, current_piece_qty, update_extreme
 
@@ -33,6 +33,7 @@ def execute_entry(
     decision: Decision,
     direction: Direction,
     snapshot: Snapshot,
+    candidate: SetupCandidate | None = None,
 ) -> tuple[OpenPosition | None, ExecutedAction | None, str | None]:
     """Returns (position, action, skip_reason) — exactly one of position/skip_reason set."""
     chain = broker.get_option_chain(snapshot.symbol)
@@ -50,6 +51,10 @@ def execute_entry(
         )
 
     fill = broker.buy_option(contract, qty)
+    fill.equity_price = snapshot.price
+    fill.stop_price = decision.stop_price
+    fill.regime = snapshot.regime
+    fill.level_quality_score = candidate.quality_score if candidate is not None else 0.0
     # A reconciled partial fill returns fewer contracts than requested — the
     # plan must cover what the account actually holds, not what was asked for.
     plan = build_plan(
@@ -140,6 +145,8 @@ def execute_scale_out(
     qty = min(current_piece_qty(position), position.qty_remaining)
     if qty > 0:
         fill = broker.sell_option(position.contract, qty)
+        fill.equity_price = snapshot.price
+        fill.exit_reason = reason
         if fill.qty == qty:
             position.pieces_sold += 1  # a partially sold piece is retried on the next signal
         if fill.qty > 0:
@@ -175,6 +182,8 @@ def execute_exit(
     qty = position.qty_remaining
     if qty > 0:
         fill = broker.sell_option(position.contract, qty)
+        fill.equity_price = snapshot.price
+        fill.exit_reason = reason
         position.qty_remaining = qty - fill.qty  # nonzero after a partial exit
         actions.append(
             ExecutedAction(

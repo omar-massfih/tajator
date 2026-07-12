@@ -73,3 +73,33 @@ def test_unclosed_position_excluded_from_stats_but_kept_in_ledger():
     assert len(report.trades) == 1
     assert not report.trades[0].closed
     assert report.daily_pnl[DAY1] == 0.0
+
+
+def test_fees_and_trade_context_are_reported():
+    buy = fill(2, 2.00, 0)
+    buy.fee = 1.30
+    buy.equity_price = 500.0
+    buy.stop_price = 499.6
+    sell = fill(2, 2.50, 5)
+    sell.fee = 1.30
+    sell.equity_price = 500.8
+    sell.exit_reason = "first target"
+    report = build_report(
+        "SPY", DAY1, DAY1, {DAY1: [("BUY", CONTRACT, buy), ("SELL", CONTRACT, sell)]},
+        metadata={"execution_model": {"modeled": True}},
+    )
+    trade = report.trades[0]
+    assert trade.gross_pnl == 100.0
+    assert trade.fees == 2.6
+    assert trade.pnl == 97.4
+    assert trade.return_on_premium == 0.2435
+    assert trade.planned_equity_risk == 0.4
+    assert trade.favorable_equity_move == 0.8
+    assert trade.adverse_equity_move == 0.0
+    assert trade.exit_reason == "first target"
+    assert trade.underlying_points == 0.8
+    assert report.gross_pnl == 100.0
+    assert report.total_fees == 2.6
+    assert report.metadata["execution_model"]["modeled"] is True
+    assert report.total_underlying_points == 0.8
+    assert report.underlying_win_rate == 1.0

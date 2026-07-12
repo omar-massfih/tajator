@@ -94,6 +94,11 @@ def test_late_entry_vetoes(settings):
     assert not run_check(settings, now=late).approved
 
 
+def test_early_entry_vetoes_configurable_window(settings):
+    settings.no_new_entries_before = MIDDAY.time().replace(hour=11, minute=30)
+    assert not run_check(settings, now=MIDDAY).approved
+
+
 def test_max_trades_vetoes(settings):
     assert not run_check(settings, trades=2).approved
 
@@ -133,6 +138,16 @@ def test_stop_band_is_configurable(settings, tmp_path):
         stop_min_cents=10, stop_max_cents=100,
     )
     assert run_check(wide, far).approved
+
+
+def test_actual_entry_to_stop_risk_cap(settings):
+    settings.max_entry_to_stop_cents = 100
+    verdict = check(
+        GOOD_ENTRY, now=MIDDAY, position=None, trades_today=0,
+        candidates=[CANDIDATE], settings=settings, snapshot_price=499.8,
+    )
+    assert not verdict.approved
+    assert any("actual entry-to-stop risk" in v for v in verdict.violations)
 
 
 def test_entry_blockers_clear_midday(settings):

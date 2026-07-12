@@ -6,7 +6,7 @@ from datetime import time
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .market.levels import (
@@ -17,6 +17,7 @@ from .market.levels import (
 )
 from .market.setups import (
     APPROACH_BAND,
+    ENTRY_CONFIRMATION,
     FAST_APPROACH_SPEED_MULT,
     MIN_LEVEL_DIST_FROM_OPEN_PCT,
     MIN_SPEED_PCT,
@@ -30,6 +31,40 @@ from .risk.guardrails import STOP_COOLDOWN_MINUTES, STOP_MAX_CENTS, STOP_MIN_CEN
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001, 7496}  # 4001 = IB Gateway live, 7496 = TWS live
 PAPER_PORTS = {4002, 7497}  # 4002 = IB Gateway paper, 7497 = TWS paper
+REGIMES = {"unknown", "range", "trend_up", "trend_down", "high_volatility"}
+
+
+class SymbolStrategyOverride(BaseModel):
+    entry_confirmation: Literal["immediate", "touch_rejection"] | None = None
+    max_entry_to_stop_cents: int | None = None
+    no_new_entries_before: time | None = None
+    no_new_entries_after: time | None = None
+    opening_confirmation_until: time | None = None
+    stop_atr_multiplier: float | None = None
+    allowed_regimes: list[str] | None = None
+    blocked_direction_regimes: list[str] | None = None
+    min_level_quality_score: float | None = None
+
+    @field_validator("blocked_direction_regimes")
+    @classmethod
+    def _valid_direction_regimes(cls, values):
+        _validate_direction_regimes(values or [])
+        return values
+
+    @model_validator(mode="after")
+    def _valid_values(self):
+        for name in ("max_entry_to_stop_cents", "stop_atr_multiplier", "min_level_quality_score"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
+        return self
+
+
+def _validate_direction_regimes(values: list[str]) -> None:
+    valid = {f"{direction}:{regime}" for direction in ("call", "put") for regime in REGIMES}
+    invalid = sorted(set(values) - valid)
+    if invalid:
+        raise ValueError(f"invalid direction/regime blocks: {', '.join(invalid)}")
 
 
 class Settings(BaseSettings):
@@ -58,6 +93,7 @@ class Settings(BaseSettings):
     max_premium_usd: float = 500.0
     stop_buffer_cents: int = 40
     no_new_entries_after: time = time(15, 30)
+    no_new_entries_before: time = time(9, 30)
     # Broker-side protective stop: a GTC market sell resting at IB, triggered
     # by the underlying crossing the plan's stop price. Backstop for the
     # in-loop mental stop — protects the position when tajator is down.
@@ -83,6 +119,15 @@ class Settings(BaseSettings):
     # Role-reversed levels (a broken support retested as resistance, and vice
     # versa) are chart context, not trades — the worst entry class in backtests.
     trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS
+    entry_confirmation: Literal["immediate", "touch_rejection"] = ENTRY_CONFIRMATION
+    opening_confirmation_until: time | None = None
+    max_entry_to_stop_cents: int | None = None
+    stop_atr_multiplier: float | None = None
+    atr_window_bars: int = 14
+    allowed_regimes: list[str] = Field(default_factory=list)
+    blocked_direction_regimes: list[str] = Field(default_factory=list)
+    min_level_quality_score: float | None = None
+    symbol_strategy_overrides: dict[str, SymbolStrategyOverride] = Field(default_factory=dict)
 
     # Stop-distance rule (defaults live next to the gate in risk/guardrails.py)
     stop_min_cents: int = STOP_MIN_CENTS
@@ -97,6 +142,14 @@ class Settings(BaseSettings):
     # two bars of the scale-out, so breakeven is the default).
     runner_stop: Literal["breakeven", "first_target"] = "breakeven"
 
+    # Conservative backtest execution model. Historical option OHLC bars do
+    # not contain a bid/ask pair, so the modeled half-spread and slippage are
+    # applied adversely to each side and disclosed in report metadata.
+    backtest_half_spread_pct: float = 0.01
+    backtest_slippage_cents: float = 1.0
+    backtest_commission_per_contract: float = 0.65
+    backtest_min_commission_per_order: float = 1.0
+
     # Telegram trade notifications (optional — leave blank to disable)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -107,7 +160,7 @@ class Settings(BaseSettings):
     log_dir: Path = AGENT_DIR / "logs"
     backtest_cache_dir: Path = AGENT_DIR / "data" / "historical"
 
-    @field_validator("no_new_entries_after", mode="before")
+    @field_validator("no_new_entries_after", "no_new_entries_before", "opening_confirmation_until", mode="before")
     @classmethod
     def _parse_time(cls, v: object) -> object:
         if isinstance(v, str) and ":" in v:
@@ -115,11 +168,34 @@ class Settings(BaseSettings):
             return time(int(hh), int(mm))
         return v
 
+    @field_validator("symbol_strategy_overrides", mode="before")
+    @classmethod
+    def _uppercase_override_symbols(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return {str(k).upper(): value for k, value in v.items()}
+        return v
+
+    @field_validator("blocked_direction_regimes")
+    @classmethod
+    def _valid_global_direction_regimes(cls, values: list[str]) -> list[str]:
+        _validate_direction_regimes(values)
+        return values
+
     @field_validator("symbols", mode="before")
     @classmethod
     def _parse_symbols(cls, v: object) -> object:
         if isinstance(v, str):
             return [s.strip().upper() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator(
+        "backtest_half_spread_pct", "backtest_slippage_cents",
+        "backtest_commission_per_contract", "backtest_min_commission_per_order",
+    )
+    @classmethod
+    def _nonnegative_backtest_costs(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("backtest execution costs cannot be negative")
         return v
 
     @model_validator(mode="after")
@@ -136,7 +212,27 @@ class Settings(BaseSettings):
                 "TRADING_MODE=paper but IB_PORT is a LIVE port. "
                 "Use 4002 (IB Gateway paper) or 7497 (TWS paper)."
             )
+        if self.no_new_entries_before >= self.no_new_entries_after:
+            raise ValueError("NO_NEW_ENTRIES_BEFORE must be before NO_NEW_ENTRIES_AFTER")
+        for name in ("max_entry_to_stop_cents", "stop_atr_multiplier", "min_level_quality_score"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.atr_window_bars < 2:
+            raise ValueError("ATR_WINDOW_BARS must be at least 2")
         return self
+
+    def for_symbol(self, symbol: str) -> "Settings":
+        override = self.symbol_strategy_overrides.get(symbol.upper())
+        if override is None:
+            return self
+        updates = {k: v for k, v in override.model_dump().items() if v is not None}
+        resolved = self.model_copy(update=updates)
+        if resolved.no_new_entries_before >= resolved.no_new_entries_after:
+            raise ValueError(
+                f"{symbol.upper()} no_new_entries_before must be before no_new_entries_after"
+            )
+        return resolved
 
 
 def load_settings() -> Settings:

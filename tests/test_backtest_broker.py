@@ -72,3 +72,20 @@ def test_cached_data_miss_is_remembered_and_still_fails(tmp_path):
     broker = BacktestBroker(_bars(), prev_day_high=505.0, prev_day_low=495.0, ib=None, cache_dir=cache_dir)
     with pytest.raises(RuntimeError, match="no historical option data"):
         broker.get_option_premium(CONTRACT)
+
+
+def test_execution_model_is_adverse_on_both_sides_and_charges_fees(tmp_path):
+    option_csv = tmp_path / "SPY" / "options" / "20260710_500C_2026-07-06.csv"
+    option_csv.parent.mkdir(parents=True)
+    option_csv.write_text(
+        "ts,open,high,low,close,volume\n"
+        "2026-07-06T09:31:00-04:00,2.00,2.00,2.00,2.00,10\n"
+    )
+    broker = BacktestBroker(
+        _bars(), ib=None, cache_dir=tmp_path, half_spread_pct=0.01,
+        slippage_cents=1.0, commission_per_contract=0.65, min_commission_per_order=1.0,
+    )
+    buy = broker.buy_option(CONTRACT, 2)
+    sell = broker.sell_option(CONTRACT, 1)
+    assert buy.premium == 2.03 and sell.premium == 1.97
+    assert buy.fee == 1.30 and sell.fee == 1.0
