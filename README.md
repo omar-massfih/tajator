@@ -80,16 +80,41 @@ uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-ll
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
     --no-llm --underlying-only --experiment baseline  # long-window signal research
 uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_risk-cap.json
-uv run tajator run          # live minute loop (paper) during market hours
+uv run tajator edge-audit logs/backtests/AAPL_2025-07-01_2026-06-30_baseline.json \
+    --validation-start 2026-01-01  # judge only a pre-declared holdout
+uv run tajator forward-validate --name aapl-rejection-v1 --symbol AAPL \
+    --date 2026-07-13  # capture a completed session before its options expire
+uv run tajator forward-latest --name msft-panel-v2 --symbol MSFT  # preferred daily capture
+uv run tajator run          # deterministic live minute loop (paper by default)
+uv run tajator run --llm    # explicitly opt into experimental LLM decisions
+uv run tajator shadow --symbol MSFT  # live TWS quotes, deterministic simulated fills, NO orders
+uv run tajator shadow-report logs/shadow --symbol MSFT
+uv run tajator edge-audit logs/shadow/MSFT_shadow_report.json --validation-only
+uv run tajator option-panel-compare logs/forward/msft-forward-v1/cumulative.json
+uv run tajator execution-calibrate logs/journal-2026-07-13.jsonl --symbol MSFT
+uv run tajator historical-signal-tournament  # cached historical TWS stock bars
+uv run tajator historical-signal-followup    # preregistered opening-drive fade
+uv run tajator historical-daily-fetch        # long-run historical TWS daily bars
+uv run tajator historical-daily-tournament   # gated swing-signal study
+uv run tajator historical-aapl-focus         # AAPL-first temporal holdout; MSFT conditional
 uv run pytest                     # full test suite
 ```
 
-`test-order` is the supervised acceptance check after any incident or config
-change: it places a real paper market order with **no** timeout-cancel, streams
-every order-status transition as it arrives, and reports the time-to-fill —
-distinguishing a slow paper-simulator fill (common without a live option-data
-subscription) from genuinely lost events. Run it (watching TWS) until fills are
-observed within `ORDER_TIMEOUT_S` before trusting `tajator run` again.
+`test-order` is the supervised acceptance check after any incident or execution
+change. It uses the same quote validation, budget sizing, market-order timeout,
+fill reconciliation, and execution telemetry as production, then immediately
+sells the confirmed paper position. A pass requires valid live bid/ask data,
+both fills within `MAX_ACCEPTABLE_FILL_LATENCY_S`, and no slippage or budget
+breach. Watch TWS while it runs. Live mode additionally requires a recent pass
+for every configured symbol plus `EXECUTION_LIVE_CONFIRMED=true`.
+
+Live entries are guarded before submission: the option needs a fresh, narrow
+bid/ask; sizing uses ask plus a reserve; and the underlying must still be inside
+the setup zone without having crossed the stop or already moved away. Orders
+remain DAY market orders. Risk-removing exits are never blocked by a missing or
+wide quote. Every order journals its arrival quote, status timeline, latency,
+fill slippage, and underlying price; a slow, slipped, or over-budget confirmed
+fill is adopted and managed but activates the kill switch against new entries.
 
 With `PROTECTIVE_STOP=true`, every entry also rests a GTC market sell at IB,
 triggered by the *underlying* crossing the plan's stop price. The in-loop mental
@@ -136,9 +161,145 @@ Use it for long windows where IB no longer exposes expired option contracts.
 reports an entire day if any required option fill is unavailable.
 Every new report carries an experiment label and configuration fingerprint in
 both its filename and metadata, so variants cannot overwrite one another.
+`backtest-compare` recomputes expectancy from each trade ledger rather than
+trusting older persisted summary fields. Its confidence interval is
+Bonferroni-adjusted across every supplied variant, preventing a lucky result
+from being promoted merely because many configurations were tried. Even a
+positive familywise interval remains exploratory until the chosen policy
+passes a subsequently frozen holdout.
 Symbol-specific strategy overrides, actual entry-to-stop caps, opening-window
 confirmation, ATR stops, regime filters, and level-quality filters are typed
 settings documented in `.env.example`; all remain disabled by default.
+
+`historical-signal-tournament` is a separate causal stock-signal research
+engine over cached TWS one-minute bars. It compares a small preregistered set of
+intraday rules on a development period, enters only after a completed signal,
+holds for a fixed 60 bars, deducts stock execution costs, and opens the
+chronological/cross-symbol validation split only for a mechanically eligible
+development winner. Confidence intervals cluster observations by trading day
+across symbols. `historical-signal-followup` implements the one declared
+development-derived opening-drive fade; it cannot silently substitute another
+rule after validation. Neither tool simulates option PnL—only a stock signal
+that passes every validation gate may advance to exact contract prices.
+
+`historical-daily-fetch` requests long-run RTH daily stock `TRADES` bars from
+TWS and caches the returned series under `data/historical/daily/`. The loader
+refuses adjacent-close discontinuities above 80% rather than assuming a split
+adjustment. `historical-daily-tournament` tests preregistered multi-day signals
+using next-session entries, non-overlapping positions, return-normalized costs,
+unseen-symbol validation, and a final temporal holdout that remains unopened
+unless validation passes. A daily stock signal still cannot establish an
+options edge without a separate exact-contract cost and decay test.
+
+`historical-aapl-focus` applies the already-selected daily trend/RSI rule to a
+fresh, isolated TWS AAPL temporal holdout. It opens MSFT replication only after
+every AAPL gate passes, and exposes `options_stage_eligible` only for an AAPL
+pass. The default cache is `data/tws-focused/`; populate it directly from TWS
+with `historical-daily-fetch --symbols AAPL,MSFT --cache-dir data/tws-focused`.
+
+`edge-audit` is the guard against promoting an attractive backtest into a
+supposed edge. It requires an explicitly declared holdout (`--validation-start`
+or `--validation-only`), at least 50 trades by default, positive expectancy, a
+95% expectancy interval above zero, positive results in at least 60% of active
+months, and adequate data coverage. Historical-options reports must also have
+a disclosed cost model and profit factor of at least 1.2. Underlying-only
+reports can support a stock signal but can never confirm an options edge. A
+holdout must be declared before looking at its results; the flag records the
+research claim but cannot make an already-inspected sample out-of-sample.
+
+Because IB may stop qualifying a weekly option soon after expiration,
+`forward-validate` is the durable options-research path. Run it after each
+completed session (normally for the previous trading day). The first capture
+locks the resolved symbol strategy, cost assumptions, deterministic no-LLM
+mode, and a fingerprint of the actual Python sources—including uncommitted
+changes. Each day also records the actual TWS option-chain snapshot, so replay
+uses the expirations that were genuinely listed (including Monday/Wednesday
+weeklies) instead of the synthetic Friday calendar required for old history.
+Later captures refuse to join that cohort if any definition changes.
+Each successful day is stored under `logs/forward/<name>/days/`, and
+`cumulative.json` is rebuilt for direct use with `edge-audit --validation-only`.
+Missing exact option data aborts the capture rather than silently excluding the
+day. Use a new cohort name whenever strategy or execution code intentionally
+changes.
+
+For daily operation, prefer `forward-latest`. It connects with dedicated
+read-only API client ID 117 by default, searches backward for the newest prior
+weekday that actually has TWS stock bars, and captures it idempotently. This
+handles weekends and holidays without guessing a session date and avoids the
+live trader's normal client ID. Run it once after each market day (or the next
+morning before the nearest weekly expires); use `--client-id` if 117 is already
+occupied. It places no orders.
+
+Completed-session capture forcibly refreshes the underlying day from TWS even
+when a CSV is already cached. A cohort admits the day only when regular-session
+bars begin by 09:31 ET and contain either a full session through 15:59 ET (at
+least 370 bars) or a standard 13:00 ET early close (at least 200 bars). The bar
+count, first/last timestamps, and session kind are preserved per day in the
+cumulative report. Truncated intraday caches fail loudly instead of becoming
+apparently complete backtests.
+
+`execution-calibrate` matches journaled paper fills to the exact contract's
+historical option bar immediately after each signal, then compares actual fills
+with the configured spread/slippage model. It reports signal-to-fill latency,
+delay beyond the modeled next-bar open, net round trips, and
+actual-versus-modeled adversity. Modern journals apply exact IB commission
+reports by order ID; configured fees fill any unmatched legacy records. Treat LLM and
+deterministic calibration samples separately: LLM samples include model
+decision latency and cannot justify replacing deterministic backtest costs.
+Older journals without commission reports remain explicitly labeled estimates.
+
+Plain `run` applies the same deterministic rule-follower used by
+`backtest --no-llm` to entries and management, so paper/live observations match
+the frozen forward cohorts by default. `run --deterministic` remains an accepted
+explicit compatibility flag. LLM decisions require `run --llm`; treat that as a
+separate experimental policy and never combine its fills with deterministic
+validation samples.
+
+Use `shadow` to collect execution evidence without authorizing even paper
+orders. It runs that same deterministic graph on live TWS stock bars and option
+quotes through dedicated client ID 116, simulates buys at the displayed ask and
+sells at the displayed bid, applies configured commissions, and writes isolated
+state/journals under `logs/shadow/`. Its broker exposes market data only: entry,
+exit, and protective-stop operations are local simulations and never call an IB
+order method. Delayed or invalid bid/ask quotes are rejected.
+
+`shadow-report` converts those quote-side fills into the standard options
+ledger accepted by `edge-audit`. Coverage counts only sessions where the
+process observed nearly the entire regular session through 15:54 ET; merely
+starting and stopping the process does not earn a complete day. Keep one
+predeclared deterministic policy and collect at least 50 closed trades across
+at least three active months before the ordinary audit gates can confirm an
+edge. Shadow mode is intentionally long-running; stop it with Ctrl-C after the
+session. No order was placed by building or testing this feature.
+
+Forward capture also records a predeclared option panel for every base trade:
+one listed strike ITM at the base expiration, one strike OTM, and the base
+strike at the next listed expiration. Every alternative uses the exact base
+entry/exit timestamps, quantities, adverse spread/slippage, and commissions.
+`option-panel-compare` reports net PnL and average return on premium and clearly
+marks incomplete variants. Dollar PnL is not capital-normalized because
+quantity is deliberately held fixed; use return on premium when comparing
+contract efficiency. Panel results are exploratory contract-selection evidence
+and do not alter or replace the base cohort's edge audit. Alternatives are
+paired to their exact base trades and need at least 50 complete pairs plus a
+positive Bonferroni-adjusted 95% familywise confidence bound before the tool
+labels their return-on-premium advantage positive. Even then, no contract
+variant is promotable until the base options strategy passes `edge-audit`.
+
+Cohorts fingerprint executable trading and backtest behavior, including
+uncommitted changes, while reporting-only modules are excluded. The capture
+pipeline is separately locked by an explicit protocol version recorded in the
+manifest. This preserves legitimate evidence across presentation/statistics
+improvements without allowing entry, exit, pricing, or contract-universe code
+to change inside a cohort.
+
+Optional multi-timeframe context (`MULTI_TIMEFRAME_CONTEXT=true`) keeps entries
+and stops on the 1-minute chart while adding completed daily trend/ATR/reference
+levels and 09:30-aligned 5-minute structure. Daily levels are context only. The
+forming 5-minute candle is labeled as incomplete, and higher-timeframe evidence
+only ranks already-valid candidates; it never creates or vetoes a setup. The
+feature defaults off until its underlying-only A/B results pass the documented
+expectancy, drawdown, and trade-retention gate.
 
 ## Safety
 
@@ -157,13 +318,14 @@ settings documented in `.env.example`; all remain disabled by default.
   operator reconciles and deletes the KILL file.
 - Ctrl-C during `run` offers to flatten any open position.
 - Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`: snapshots, candidates,
-  every LLM decision + reasoning, risk vetoes, and fills.
+  every LLM decision + reasoning, risk vetoes, fills, quote preflights, order
+  timelines, execution quality, diagnostics, and commission reports.
 
 ## Out of scope (v1)
 
 Multi-symbol scanning (the watchlist is a fixed list, not a scanner), dashboards,
-greeks/IV modeling, spreads, limit orders, broker-side stops (the mental stop is
-enforced by the loop), holiday calendar. Market orders only.
+greeks/IV modeling, option-spread strategies, limit orders, holiday calendar.
+Market orders only.
 
 Fixed watchlist (`SYMBOLS=SPY,AAPL,MSFT,NVDA`, one comma-separated env var) — each
 symbol runs its own independent `TradingSession` (own position, own daily trade
