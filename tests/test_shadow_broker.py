@@ -46,6 +46,9 @@ class MarketDataOnly:
     def get_underlying_price(self, symbol):
         return 100.0
 
+    def get_entry_market_snapshot(self, contract):
+        return self.quote, 100.0
+
     @property
     def is_delayed_data(self):
         return self.quote.delayed

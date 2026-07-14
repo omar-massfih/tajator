@@ -83,6 +83,11 @@ class ShadowBroker(Broker):
     def get_underlying_price(self, symbol: str) -> float | None:
         return self.market.get_underlying_price(symbol)
 
+    def get_entry_market_snapshot(
+        self, contract: SelectedContract,
+    ) -> tuple[OptionQuote, float | None]:
+        return self.market.get_entry_market_snapshot(contract)
+
     def record_execution_preflight(self, **payload: object) -> None:
         self.journal.write("shadow_execution_preflight", **payload)
 
@@ -90,13 +95,20 @@ class ShadowBroker(Broker):
     def is_delayed_data(self) -> bool:
         return self.market.is_delayed_data
 
-    def _fill(self, contract: SelectedContract, qty: int, side: str) -> Fill:
+    def _fill(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        side: str,
+        quote: OptionQuote | None = None,
+        underlying: float | None = None,
+    ) -> Fill:
         submitted = self.now()
-        quote = self.get_option_quote(contract)
+        if quote is None:
+            quote, underlying = self.get_entry_market_snapshot(contract)
         if not quote.valid or quote.delayed:
             raise RuntimeError(f"shadow {side} has no executable bid/ask for {contract.local_name}")
         premium = quote.ask if side == "BUY" else quote.bid
-        underlying = self.get_underlying_price(contract.symbol)
         filled_at = self.now()
         fee = max(
             self.settings.backtest_min_commission_per_order,
@@ -138,6 +150,15 @@ class ShadowBroker(Broker):
 
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._fill(contract, qty, "BUY")
+
+    def buy_option_from_snapshot(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        quote: OptionQuote,
+        underlying: float | None,
+    ) -> Fill:
+        return self._fill(contract, qty, "BUY", quote, underlying)
 
     def sell_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._fill(contract, qty, "SELL")

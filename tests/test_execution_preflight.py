@@ -71,6 +71,36 @@ def test_guarded_entry_sizes_from_ask_plus_reserve():
     assert broker.preflights[0]["accepted"] is True
 
 
+def test_guarded_entry_uses_one_atomic_market_snapshot_boundary():
+    broker, snapshot, candidate, decision = support_setup()
+    calls = []
+
+    def atomic(contract):
+        calls.append(contract)
+        return broker.quote, broker.underlying
+
+    submissions = []
+
+    def buy_from_snapshot(contract, qty, quote, underlying):
+        submissions.append((contract, qty, quote, underlying))
+        return broker.buy_option(contract, qty)
+
+    broker.get_entry_market_snapshot = atomic
+    broker.buy_option_from_snapshot = buy_from_snapshot
+    broker.get_option_quote = lambda contract: pytest.fail("sequential option request used")
+    broker.get_underlying_price = lambda symbol: pytest.fail("sequential stock request used")
+
+    position, action, skip = execute_entry(
+        broker, Settings(_env_file=None), decision, "call", snapshot, candidate
+    )
+
+    assert skip is None
+    assert position is not None and action is not None
+    assert len(calls) == 1
+    assert len(submissions) == 1
+    assert submissions[0][2:] == (broker.quote, broker.underlying)
+
+
 @pytest.mark.parametrize(
     ("quote_kwargs", "reason"),
     [
@@ -141,7 +171,7 @@ def test_entry_quote_request_failure_is_journaled_and_skipped():
     _, _, skip = execute_entry(
         broker, Settings(_env_file=None), decision, "call", snapshot, candidate
     )
-    assert "quote request failed" in skip
+    assert "market snapshot request failed" in skip
     assert broker.fills == []
     assert broker.preflights[0]["accepted"] is False
 

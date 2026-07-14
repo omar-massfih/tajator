@@ -380,15 +380,13 @@ class IBBroker(Broker):
     def get_option_quote(self, contract: SelectedContract) -> OptionQuote:
         opt = self._option(contract)
         [ticker] = self.ib.reqTickers(opt)
-        quote_ts = getattr(ticker, "time", None)
-        if isinstance(quote_ts, datetime):
-            quote_ts = (
-                quote_ts.replace(tzinfo=ET)
-                if quote_ts.tzinfo is None
-                else quote_ts.astimezone(ET)
-            )
-        else:
-            quote_ts = self.now()
+        return self._option_quote_from_ticker(ticker)
+
+    def _option_quote_from_ticker(self, ticker) -> OptionQuote:
+        # reqTickers is a synchronous snapshot request. Freshness means when
+        # that request completed, not when IB last observed a changed price;
+        # an unchanged NBBO can legitimately have an older ticker.time.
+        quote_ts = self.now()
         return OptionQuote(
             bid=self._positive_price(getattr(ticker, "bid", None)),
             ask=self._positive_price(getattr(ticker, "ask", None)),
@@ -396,6 +394,18 @@ class IBBroker(Broker):
             ts=quote_ts,
             delayed=self._delayed,
             source="ib_delayed" if self._delayed else "ib_live",
+        )
+
+    def get_entry_market_snapshot(
+        self, contract: SelectedContract,
+    ) -> tuple[OptionQuote, float | None]:
+        """Fetch both entry references in one IB snapshot round trip."""
+        opt = self._option(contract)
+        stock = self._underlying(contract.symbol)
+        option_ticker, stock_ticker = self.ib.reqTickers(opt, stock)
+        return (
+            self._option_quote_from_ticker(option_ticker),
+            self._positive_price(stock_ticker.marketPrice()),
         )
 
     def get_underlying_price(self, symbol: str) -> float | None:
@@ -409,22 +419,43 @@ class IBBroker(Broker):
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._place(contract, "BUY", qty)
 
+    def buy_option_from_snapshot(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        quote: OptionQuote,
+        underlying: float | None,
+    ) -> Fill:
+        return self._place(
+            contract,
+            "BUY",
+            qty,
+            arrival_quote=quote,
+            underlying_submit=underlying,
+            snapshot_supplied=True,
+        )
+
     def sell_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._place(contract, "SELL", qty)
 
-    def _place(self, contract: SelectedContract, side: str, qty: int) -> Fill:
+    def _place(
+        self,
+        contract: SelectedContract,
+        side: str,
+        qty: int,
+        *,
+        arrival_quote: OptionQuote | None = None,
+        underlying_submit: float | None = None,
+        snapshot_supplied: bool = False,
+    ) -> Fill:
         opt = self._option(contract)
         qty_before = self._snapshot_position(opt)
-        try:
-            arrival_quote = self.get_option_quote(contract)
-        except Exception:  # exits must never fail merely because a quote request failed
-            log.exception("could not capture arrival quote for %s", contract.local_name)
-            arrival_quote = None
-        try:
-            underlying_submit = self.get_underlying_price(contract.symbol)
-        except Exception:
-            log.exception("could not capture underlying at submission for %s", contract.symbol)
-            underlying_submit = None
+        if not snapshot_supplied and side == "BUY":
+            # A risk-increasing order is optional and fails closed if its
+            # execution-boundary facts cannot be captured.
+            arrival_quote, underlying_submit = self.get_entry_market_snapshot(contract)
+        # Risk-reducing exits submit immediately. A synchronous IB snapshot can
+        # take 10+ seconds and must never sit in front of a stop or forced exit.
         order = MarketOrder(side, qty)
         order.tif = "DAY"
         order.orderRef = f"{self.settings.order_ref_prefix}:{contract.symbol}"
@@ -468,11 +499,10 @@ class IBBroker(Broker):
     ) -> Fill:
         filled_at = fill.ts
         latency = max(0.0, time.monotonic() - started)
-        try:
-            underlying_fill = self.get_underlying_price(contract.symbol)
-        except Exception:
-            log.exception("could not capture underlying at fill for %s", contract.symbol)
-            underlying_fill = None
+        # Do not insert another blocking market-data request between a fill and
+        # state persistence/protective-stop placement. The accepted submission
+        # reference is the closest synchronous underlying fact available here.
+        underlying_fill = underlying_submit
         reference = None
         if quote is not None and quote.valid:
             reference = quote.ask if side == "BUY" else quote.bid

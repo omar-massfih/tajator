@@ -1,6 +1,8 @@
 """IBBroker safety mechanics that don't need a live Gateway."""
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,6 +11,8 @@ from tajator.broker.ib import IBBroker
 from tajator.config import Settings
 from tajator.journal import Journal
 from tajator.models import OptionQuote, ProtectiveStop, SelectedContract
+
+ET = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
@@ -75,6 +79,80 @@ def test_open_option_positions_reports_configured_symbols_only(settings):
     assert "SPY 260710C00500000" in found[0]
 
 
+def test_entry_market_snapshot_requests_option_and_stock_together(settings, monkeypatch):
+    broker = IBBroker(settings)
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+    option = object()
+    stock = object()
+    captured_at = datetime(2026, 7, 14, 13, 11, 7, tzinfo=ET)
+    option_ticker = SimpleNamespace(
+        bid=1.98,
+        ask=2.04,
+        last=2.00,
+        time=captured_at - timedelta(seconds=30),
+    )
+    stock_ticker = SimpleNamespace(marketPrice=lambda: 314.705)
+    requests = []
+
+    def req_tickers(*contracts):
+        requests.append(contracts)
+        return [option_ticker, stock_ticker]
+
+    broker.ib = SimpleNamespace(reqTickers=req_tickers)
+    monkeypatch.setattr(broker, "_option", lambda selected: option)
+    monkeypatch.setattr(broker, "_underlying", lambda symbol: stock)
+    monkeypatch.setattr(broker, "now", lambda: captured_at)
+
+    quote, underlying = broker.get_entry_market_snapshot(contract)
+
+    assert requests == [(option, stock)]
+    assert quote.bid == 1.98 and quote.ask == 2.04
+    assert quote.ts == captured_at
+    assert underlying == 314.705
+
+
+def test_buy_uses_accepted_snapshot_without_another_market_request(settings, monkeypatch):
+    trade = make_trade(status="Filled", status_filled=1, avg_price=2.04)
+    broker = IBBroker(settings)
+    broker.ib = FakeIB(trade, fill_effect=1)
+    monkeypatch.setattr(broker, "_option", lambda contract: SimpleNamespace(conId=CON_ID))
+    monkeypatch.setattr(
+        broker, "get_entry_market_snapshot",
+        lambda contract: pytest.fail("duplicate market snapshot requested"),
+    )
+    quote = OptionQuote(bid=1.98, ask=2.04, ts=broker.now())
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+
+    fill = broker.buy_option_from_snapshot(contract, 1, quote, 314.705)
+
+    assert fill.execution_quality.quote == quote
+    assert fill.execution_quality.underlying_submit == 314.705
+    assert fill.execution_quality.underlying_fill == 314.705
+
+
+def test_sell_submits_without_waiting_for_market_snapshot(settings, monkeypatch):
+    trade = make_trade(status="Filled", status_filled=1, avg_price=1.80)
+    broker = IBBroker(settings)
+    broker.ib = FakeIB(trade, qty_before=1, fill_effect=1)
+    monkeypatch.setattr(broker, "_option", lambda contract: SimpleNamespace(conId=CON_ID))
+    monkeypatch.setattr(
+        broker, "get_entry_market_snapshot",
+        lambda contract: pytest.fail("risk-reducing exit waited for market data"),
+    )
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+
+    fill = broker.sell_option(contract, 1)
+
+    assert fill.qty == 1
+    assert fill.execution_quality.quote is None
+
+
 # -- _place reconciliation ------------------------------------------------------
 #
 # Regression for the 2026-07-08 incident: market orders timed out, were
@@ -131,7 +209,7 @@ def place(settings, monkeypatch, trade, side="BUY", qty=1, **fake_ib_kwargs):
     broker.ib = FakeIB(trade, **fake_ib_kwargs)
     contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")
     monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
-    return broker._place(contract, side, qty)
+    return broker._place(contract, side, qty, snapshot_supplied=True)
 
 
 def test_cancelled_but_actually_filled_adopts_the_fill(settings, monkeypatch):
@@ -214,7 +292,7 @@ def test_normal_market_orders_are_explicit_day(settings, monkeypatch, side):
     monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
     contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")
 
-    broker._place(contract, side, 1)
+    broker._place(contract, side, 1, snapshot_supplied=True)
 
     _, _, order = fake_ib.placed[0]
     assert order.orderType == "MKT"
@@ -229,8 +307,7 @@ def quality_broker(settings, monkeypatch, *, fill_price, quote, side="BUY", late
     broker.journal = Journal(settings.log_dir)
     broker.ib = FakeIB(trade, qty_before=0 if side == "BUY" else 1, fill_effect=1)
     monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
-    monkeypatch.setattr(broker, "get_option_quote", lambda c: quote)
-    monkeypatch.setattr(broker, "get_underlying_price", lambda symbol: 200.0)
+    monkeypatch.setattr(broker, "get_entry_market_snapshot", lambda c: (quote, 200.0))
     times = iter([100.0, 100.0, 100.0 + latency])
     monkeypatch.setattr("tajator.broker.ib.time.monotonic", lambda: next(times))
     contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")

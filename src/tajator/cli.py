@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -57,7 +58,13 @@ def main() -> None:
         "--client-id", type=int, default=116,
         help="dedicated TWS market-data client ID (default: 116)",
     )
-    sub.add_parser("check-ib", help="connectivity check: bars, chain, quote — no orders")
+    check_ib = sub.add_parser(
+        "check-ib", help="connectivity check: bars, chain, quote — no orders"
+    )
+    check_ib.add_argument(
+        "--client-id", type=int, default=118,
+        help="dedicated read-only diagnostic client ID (default: 118)",
+    )
     sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
     test_order = sub.add_parser(
@@ -223,7 +230,7 @@ def main() -> None:
     elif args.command == "shadow":
         cmd_shadow(args)
     elif args.command == "check-ib":
-        cmd_check_ib()
+        cmd_check_ib(args)
     elif args.command == "test-order":
         cmd_test_order(args)
     elif args.command == "prep":
@@ -398,10 +405,11 @@ def cmd_shadow(args) -> None:
         market.disconnect()
 
 
-def cmd_check_ib() -> None:
+def cmd_check_ib(args) -> None:
     from .trade.contracts import select_contract
 
-    settings, broker = _ib_broker()
+    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
+    settings, broker = _ib_broker(settings)
     try:
         print(f"connected: {broker.is_connected()}  (market data type {settings.market_data_type})")
         accounts = broker.ib.managedAccounts()
@@ -423,8 +431,15 @@ def cmd_check_ib() -> None:
             if bars:
                 contract = select_contract(chain, symbol, bars[-1].close, "call", broker.now())
                 if contract:
-                    premium = broker.get_option_premium(contract)
-                    print(f"nearest-strike call: {contract.local_name} — premium {premium}")
+                    started = time.monotonic()
+                    quote, underlying = broker.get_entry_market_snapshot(contract)
+                    elapsed = time.monotonic() - started
+                    age = max(0.0, (broker.now() - quote.ts).total_seconds())
+                    print(
+                        f"atomic entry snapshot ({elapsed:.2f}s): underlying {underlying}; "
+                        f"{contract.local_name} bid {quote.bid} / ask {quote.ask} / "
+                        f"last {quote.last}; quote age {age:.2f}s"
+                    )
         print("\ncheck-ib complete. No orders were placed.")
     finally:
         broker.disconnect()
@@ -460,7 +475,7 @@ def cmd_test_order(args) -> None:
         contract = select_contract(chain, symbol, spot, "call", broker.now())
         if contract is None:
             sys.exit(f"no usable {symbol} contract in the chain")
-        quote = broker.get_option_quote(contract)
+        quote, underlying = broker.get_entry_market_snapshot(contract)
         print(
             f"{contract.local_name}: bid {quote.bid} / ask {quote.ask} / last {quote.last} "
             f"({'DELAYED' if quote.delayed else 'live'} quotes)"
@@ -477,7 +492,9 @@ def cmd_test_order(args) -> None:
             )
 
         print(f"\nplacing BUY {args.qty}x {contract.local_name} through production market path ...")
-        buy_fill = broker.buy_option(contract, args.qty)
+        buy_fill = broker.buy_option_from_snapshot(
+            contract, args.qty, quote, underlying,
+        )
         print(
             f"filled {buy_fill.qty}x @ {buy_fill.premium:.2f} in "
             f"{buy_fill.execution_quality.latency_s:.1f}s"

@@ -116,24 +116,13 @@ def execute_entry(
     preflight_underlying = None
     if broker.uses_live_execution_guards:
         try:
-            preflight_quote = broker.get_option_quote(contract)
+            preflight_quote, preflight_underlying = broker.get_entry_market_snapshot(contract)
         except Exception as exc:  # fail closed: an entry is optional
-            reason = f"entry option quote request failed: {exc}"
+            reason = f"entry market snapshot request failed: {exc}"
             broker.record_execution_preflight(
                 ts=broker.now(), symbol=snapshot.symbol, contract=contract,
                 signal_ts=snapshot.ts, signal_equity_price=snapshot.price,
                 underlying_price=None, option_quote=None, accepted=False, reason=reason,
-            )
-            return None, None, reason
-        try:
-            preflight_underlying = broker.get_underlying_price(snapshot.symbol)
-        except Exception as exc:  # exits intentionally do not use this gate
-            reason = f"entry underlying quote request failed: {exc}"
-            broker.record_execution_preflight(
-                ts=preflight_quote.ts, symbol=snapshot.symbol, contract=contract,
-                signal_ts=snapshot.ts, signal_equity_price=snapshot.price,
-                underlying_price=None, option_quote=preflight_quote,
-                accepted=False, reason=reason,
             )
             return None, None, reason
         reason = validate_entry_preflight(
@@ -167,7 +156,13 @@ def execute_entry(
             f"one {contract.local_name} reserves ${reserved_cost:.0f} — over MAX_PREMIUM_USD budget"
         )
 
-    fill = broker.buy_option(contract, qty)
+    fill = (
+        broker.buy_option_from_snapshot(
+            contract, qty, preflight_quote, preflight_underlying,
+        )
+        if preflight_quote is not None
+        else broker.buy_option(contract, qty)
+    )
     quality = fill.execution_quality
     if quality is not None:
         quality.signal_ts = snapshot.ts

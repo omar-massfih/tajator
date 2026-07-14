@@ -147,12 +147,39 @@ class Broker(ABC):
         bars = self.get_bars(symbol, lookback_minutes=1)
         return bars[-1].close if bars else None
 
+    def get_entry_market_snapshot(
+        self, contract: SelectedContract,
+    ) -> tuple[OptionQuote, float | None]:
+        """Option quote and underlying reference for one entry preflight.
+
+        Simple and replay brokers can fetch the two legs independently. Live
+        brokers should override this method so both snapshots are requested in
+        one round trip; otherwise the first quote can age out while the second
+        blocking request is still in flight.
+        """
+        return self.get_option_quote(contract), self.get_underlying_price(contract.symbol)
+
     def record_execution_preflight(self, **payload: object) -> None:
         """Optional live-broker telemetry hook; replay/backtest brokers ignore it."""
         return None
 
     @abstractmethod
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill: ...
+
+    def buy_option_from_snapshot(
+        self,
+        contract: SelectedContract,
+        qty: int,
+        quote: OptionQuote,
+        underlying: float | None,
+    ) -> Fill:
+        """Submit an entry using the market snapshot that passed preflight.
+
+        Brokers without synchronous live execution can ignore the supplied
+        facts. A live broker overrides this to avoid a second blocking quote
+        round trip between validation and order submission.
+        """
+        return self.buy_option(contract, qty)
 
     @abstractmethod
     def sell_option(self, contract: SelectedContract, qty: int) -> Fill: ...

@@ -56,3 +56,11 @@ def test_shadow_has_dedicated_default_client_id(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tajator", "shadow", "--symbol", "MSFT"])
     cli.main()
     assert seen == [116]
+
+
+def test_check_ib_has_dedicated_default_client_id(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_check_ib", lambda args: seen.append(args.client_id))
+    monkeypatch.setattr(sys, "argv", ["tajator", "check-ib"])
+    cli.main()
+    assert seen == [118]
