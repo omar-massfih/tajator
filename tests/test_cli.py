@@ -1,4 +1,9 @@
 import sys
+from datetime import date, datetime
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from tajator import cli
 from tajator.config import Settings
@@ -99,3 +104,45 @@ def test_forward_init_forwards_manifest_identity_without_tws(monkeypatch):
     cli.main()
     assert seen[0].name == "aapl-panel-v4"
     assert seen[0].symbol == "AAPL"
+
+
+def test_backtest_accepts_current_tws_chain_diagnostic_flag(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_backtest", lambda args: seen.append(args))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tajator", "backtest", "--symbol", "AAPL", "--start", "2026-07-14",
+            "--end", "2026-07-14", "--no-llm", "--tws-chain-snapshot",
+        ],
+    )
+    cli.main()
+    assert seen[0].tws_chain_snapshot is True
+
+
+@pytest.mark.parametrize(
+    ("cached_only", "underlying_only"),
+    [(True, False), (False, True)],
+)
+def test_tws_chain_snapshot_requires_online_exact_option_mode(
+    cached_only, underlying_only,
+):
+    args = SimpleNamespace(cached_only=cached_only, underlying_only=underlying_only)
+    now = datetime(2026, 7, 14, 16, 5, tzinfo=ZoneInfo("America/New_York"))
+    with pytest.raises(ValueError, match="online exact-option"):
+        cli._validate_tws_chain_snapshot(args, date(2026, 7, 14), date(2026, 7, 14), now)
+
+
+def test_tws_chain_snapshot_requires_single_current_day():
+    args = SimpleNamespace(cached_only=False, underlying_only=False)
+    now = datetime(2026, 7, 14, 16, 5, tzinfo=ZoneInfo("America/New_York"))
+    with pytest.raises(ValueError, match="single current-day"):
+        cli._validate_tws_chain_snapshot(args, date(2026, 7, 13), date(2026, 7, 14), now)
+
+
+def test_tws_chain_snapshot_waits_until_regular_session_close():
+    args = SimpleNamespace(cached_only=False, underlying_only=False)
+    now = datetime(2026, 7, 14, 13, 5, tzinfo=ZoneInfo("America/New_York"))
+    with pytest.raises(ValueError, match="session to be complete"):
+        cli._validate_tws_chain_snapshot(args, date(2026, 7, 14), date(2026, 7, 14), now)

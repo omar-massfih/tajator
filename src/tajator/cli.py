@@ -18,6 +18,18 @@ from .notify import NullNotifier, TelegramNotifier
 ET = ZoneInfo("America/New_York")
 
 
+def _validate_tws_chain_snapshot(args, start, end, now: datetime) -> None:
+    """Keep the live-chain replay diagnostic narrow and strictly post-session."""
+    if args.cached_only or args.underlying_only:
+        raise ValueError("--tws-chain-snapshot requires an online exact-option backtest")
+    if start != end or start != now.date():
+        raise ValueError(
+            "--tws-chain-snapshot is restricted to a single current-day diagnostic"
+        )
+    if (now.hour, now.minute) < (16, 0):
+        raise ValueError("--tws-chain-snapshot requires the current session to be complete")
+
+
 def _runtime_policy_metadata(settings, deterministic: bool) -> dict:
     """Journal enough identity to keep incompatible execution samples separate."""
     from .backtest.forward import _definition, _source_fingerprint
@@ -110,6 +122,10 @@ def main() -> None:
     backtest.add_argument(
         "--cached-only", action="store_true",
         help="never fetch missing historical bars; replay only files already in the cache",
+    )
+    backtest.add_argument(
+        "--tws-chain-snapshot", action="store_true",
+        help="single current-day diagnostic using the actual TWS expiration/strike chain",
     )
     backtest.add_argument("--experiment", default="baseline", help="report/journal experiment label")
 
@@ -678,13 +694,28 @@ def cmd_backtest(args) -> None:
     if end < start:
         sys.exit("--end must not be before --start")
     cache_dir = args.cache_dir or settings.backtest_cache_dir
+    chain_override = None
     try:
+        if args.tws_chain_snapshot:
+            _validate_tws_chain_snapshot(args, start, end, datetime.now(ET))
+            from .backtest.data import ensure_underlying_bars
+            from .backtest.forward import session_quality
+
+            bars = ensure_underlying_bars(ib, symbol, start, cache_dir, refresh=True)
+            quality = session_quality(bars, start)
+            if not quality["complete"]:
+                raise ValueError(
+                    f"current TWS session is incomplete: {quality['rth_bars']} RTH bars, "
+                    f"last={quality['last']}"
+                )
+            chain_override = ib.get_option_chain(symbol)
         report = run_backtest(
             symbol, start, end, settings, use_llm=not args.no_llm, ib=ib, cache_dir=cache_dir,
             skip_missing_option_data=args.skip_missing_option_data,
             underlying_only=args.underlying_only,
             cached_only=args.cached_only,
             experiment=args.experiment,
+            chain_override=chain_override,
         )
     except Exception as exc:  # noqa: BLE001 — e.g. bad LLM config; fail with a clean message
         if ib is not None:
