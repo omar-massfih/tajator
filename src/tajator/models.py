@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field
 
 Direction = Literal["call", "put"]
 
+VisionPatternName = Literal[
+    "none",
+    "double_top",
+    "double_bottom",
+    "head_and_shoulders",
+    "inverse_head_and_shoulders",
+    "triangle_breakout_up",
+    "triangle_breakout_down",
+]
+
 
 class Bar(BaseModel):
     """One 1-minute equity bar, timestamped in US/Eastern."""
@@ -212,6 +222,33 @@ class Decision(BaseModel):
     )
     confidence: Literal["low", "medium", "high"] = "low"
     reasoning: str = Field(description="Short chart-based justification, journaled verbatim")
+
+
+class VisionPatternAnalysis(BaseModel):
+    """Structured chart read produced by the experimental vision mode.
+
+    This is deliberately not an executable ``Decision``. The graph must first
+    validate direction, confirmation, and prices, then construct a normal
+    candidate that still passes the existing risk gate.
+    """
+
+    action: Literal["wait", "enter_call", "enter_put"] = "wait"
+    pattern: VisionPatternName = "none"
+    status: Literal["none", "forming", "confirmed"] = "none"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    breakout_price: float | None = Field(
+        default=None,
+        description="Underlying price level whose completed-bar break confirms the pattern",
+    )
+    invalidation_price: float | None = Field(
+        default=None,
+        description="Underlying price that invalidates the pattern thesis",
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Two or fewer observable chart facts; no hidden indicators or news",
+    )
+    reasoning: str = Field(description="Concise visual assessment, journaled verbatim")
 
 
 class RiskVerdict(BaseModel):

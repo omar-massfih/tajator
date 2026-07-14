@@ -20,6 +20,7 @@ from ..models import (
     OpenPosition,
     SetupCandidate,
     Snapshot,
+    VisionPatternAnalysis,
 )
 from ..trade.position import active_stop_price
 from .prompts import PREP_SYSTEM_PROMPT, SYSTEM_PROMPT
@@ -36,11 +37,18 @@ def build_llm(model_string: str, output_model: type[BaseModel] = Decision):
     if model_string == "codex" or model_string.startswith("codex:"):
         from .codex import BRIEFING_SCHEMA, DECISION_SCHEMA, CodexDecider
 
+        if output_model not in (Decision, MorningBriefing):
+            raise ValueError("Codex CLI models do not support vision-pattern image input")
         _, _, model = model_string.partition(":")
         schema = BRIEFING_SCHEMA if output_model is MorningBriefing else DECISION_SCHEMA
         return CodexDecider(model=model or None, output_model=output_model, schema=schema)
     llm = init_chat_model(model_string, timeout=LLM_TIMEOUT_S)
     return llm.with_structured_output(output_model)
+
+
+def build_vision_llm(model_string: str):
+    """Build the structured multimodal classifier used only by vision mode."""
+    return build_llm(model_string, output_model=VisionPatternAnalysis)
 
 
 def format_snapshot(
