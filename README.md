@@ -80,6 +80,11 @@ uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-ll
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
     --no-llm --underlying-only --experiment baseline  # long-window signal research
 uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_risk-cap.json
+uv run tajator strategy-compare \
+    logs/backtests/MSFT_2024-07-01_2025-12-31_msft-risk-cap-holdout-current-v1.json \
+    logs/backtests/MSFT_2024-07-01_2025-12-31_msft-risk-cap-holdout-candidate-v1.json \
+    --min-trades 250 --only-change max_entry_to_stop_cents \
+    --output logs/research/msft-risk-cap-holdout-v1.json
 uv run tajator edge-audit logs/backtests/AAPL_2025-07-01_2026-06-30_baseline.json \
     --validation-start 2026-01-01  # judge only a pre-declared holdout
 uv run tajator forward-validate --name aapl-rejection-v1 --symbol AAPL \
@@ -107,6 +112,15 @@ sells the confirmed paper position. A pass requires valid live bid/ask data,
 both fills within `MAX_ACCEPTABLE_FILL_LATENCY_S`, and no slippage or budget
 breach. Watch TWS while it runs. Live mode additionally requires a recent pass
 for every configured symbol plus `EXECUTION_LIVE_CONFIRMED=true`.
+
+`strategy-compare` is the promotion gate for a baseline and one locked
+candidate replayed over the same stock-price window. It aggregates each replay
+by active trading day because vetoing a setup can expose a different later
+trade; absent trades on either side count as zero for that paired day. The
+report checks the candidate's absolute confidence interval, paired daily
+improvement interval, coverage, positive months and half-years, drawdown, and
+prints every changed strategy setting. Use a fresh isolated TWS cache for the
+baseline and `--cached-only` for the candidate so both see identical bars.
 
 Live entries are guarded before submission: the option needs a fresh, narrow
 bid/ask; sizing uses ask plus a reserve; and the underlying must still be inside
