@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tajator import cli
+from tajator.broker.ib import IBBroker
 from tajator.config import Settings
+from tajator.models import SelectedContract
 
 
 def test_run_deterministic_flag_is_forwarded(monkeypatch):
@@ -146,3 +148,70 @@ def test_tws_chain_snapshot_waits_until_regular_session_close():
     now = datetime(2026, 7, 14, 13, 5, tzinfo=ZoneInfo("America/New_York"))
     with pytest.raises(ValueError, match="session to be complete"):
         cli._validate_tws_chain_snapshot(args, date(2026, 7, 14), date(2026, 7, 14), now)
+
+
+def test_streaming_entry_diagnostic_returns_first_complete_quote_and_cancels(
+    monkeypatch, tmp_path,
+):
+    broker = IBBroker(Settings(_env_file=None, log_dir=tmp_path))
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+    option, stock = object(), object()
+    option_ticker = SimpleNamespace(bid=float("nan"), ask=float("nan"), last=2.0)
+    stock_ticker = SimpleNamespace(price=None)
+    stock_ticker.marketPrice = lambda: stock_ticker.price
+    requests, cancelled = [], []
+
+    def request(requested, snapshot):
+        requests.append((requested, snapshot))
+        return option_ticker if requested is option else stock_ticker
+
+    def update(timeout):
+        option_ticker.bid, option_ticker.ask = 1.98, 2.04
+        stock_ticker.price = 314.705
+
+    broker.ib = SimpleNamespace(
+        reqMktData=request, waitOnUpdate=update, cancelMktData=cancelled.append,
+    )
+    monkeypatch.setattr(broker, "_option", lambda selected: option)
+    monkeypatch.setattr(broker, "_underlying", lambda symbol: stock)
+    times = iter([100.0, 100.0, 100.2])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    quote, underlying, elapsed = cli._streaming_entry_market_diagnostic(broker, contract)
+
+    assert requests == [(option, False), (stock, False)]
+    assert cancelled == [option, stock]
+    assert quote.bid == 1.98 and quote.ask == 2.04
+    assert underlying == 314.705
+    assert elapsed == pytest.approx(0.2)
+
+
+def test_streaming_entry_diagnostic_timeout_reports_partial_state_and_cancels(
+    monkeypatch, tmp_path,
+):
+    broker = IBBroker(Settings(_env_file=None, log_dir=tmp_path))
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+    option, stock = object(), object()
+    option_ticker = SimpleNamespace(bid=None, ask=None, last=None)
+    stock_ticker = SimpleNamespace(marketPrice=lambda: 314.70)
+    cancelled = []
+    broker.ib = SimpleNamespace(
+        reqMktData=lambda requested, snapshot: (
+            option_ticker if requested is option else stock_ticker
+        ),
+        waitOnUpdate=lambda timeout: None,
+        cancelMktData=cancelled.append,
+    )
+    monkeypatch.setattr(broker, "_option", lambda selected: option)
+    monkeypatch.setattr(broker, "_underlying", lambda symbol: stock)
+    times = iter([100.0, 105.0])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    with pytest.raises(TimeoutError, match=r"bid=None, ask=None, underlying=314.7"):
+        cli._streaming_entry_market_diagnostic(broker, contract)
+
+    assert cancelled == [option, stock]

@@ -446,11 +446,51 @@ def cmd_shadow(args) -> None:
         market.disconnect()
 
 
+def _streaming_entry_market_diagnostic(broker, contract, timeout_s: float = 5.0):
+    """Read-only trial of concurrent temporary streams; never submits an order."""
+    opt = broker._option(contract)
+    stock = broker._underlying(contract.symbol)
+    subscriptions = []
+    started = time.monotonic()
+    bid = ask = underlying = None
+    try:
+        option_ticker = broker.ib.reqMktData(opt, snapshot=False)
+        subscriptions.append(opt)
+        stock_ticker = broker.ib.reqMktData(stock, snapshot=False)
+        subscriptions.append(stock)
+        while True:
+            bid = broker._positive_price(getattr(option_ticker, "bid", None))
+            ask = broker._positive_price(getattr(option_ticker, "ask", None))
+            underlying = broker._positive_price(stock_ticker.marketPrice())
+            if bid is not None and ask is not None and underlying is not None:
+                return (
+                    broker._option_quote_from_ticker(option_ticker),
+                    underlying,
+                    time.monotonic() - started,
+                )
+            remaining = timeout_s - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no complete option/stock quote after {timeout_s:.1f}s "
+                    f"(bid={bid}, ask={ask}, underlying={underlying})"
+                )
+            broker.ib.waitOnUpdate(timeout=min(0.25, remaining))
+    finally:
+        for subscribed in subscriptions:
+            try:
+                broker.ib.cancelMktData(subscribed)
+            except Exception as exc:  # noqa: BLE001 — diagnostic cleanup is best effort
+                logging.getLogger(__name__).warning(
+                    "could not cancel diagnostic market-data stream: %s", exc,
+                )
+
+
 def cmd_check_ib(args) -> None:
     from .trade.contracts import select_contract
 
     settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
     settings, broker = _ib_broker(settings)
+    diagnostics = Journal(settings.log_dir / "diagnostics")
     try:
         print(f"connected: {broker.is_connected()}  (market data type {settings.market_data_type})")
         accounts = broker.ib.managedAccounts()
@@ -472,15 +512,94 @@ def cmd_check_ib(args) -> None:
             if bars:
                 contract = select_contract(chain, symbol, bars[-1].close, "call", broker.now())
                 if contract:
+                    diagnostic_started_at = broker.now()
+                    diagnostic_id = f"{symbol}:{diagnostic_started_at.isoformat()}"
+                    entry_window = (9, 30) <= (
+                        diagnostic_started_at.hour, diagnostic_started_at.minute,
+                    ) <= (14, 0)
+                    stream_started = time.monotonic()
+                    try:
+                        quote, underlying, elapsed = _streaming_entry_market_diagnostic(
+                            broker, contract,
+                        )
+                        diagnostics.write(
+                            "entry_market_data_diagnostic",
+                            ts=broker.now(),
+                            symbol=symbol,
+                            diagnostic_id=diagnostic_id,
+                            regular_entry_window=entry_window,
+                            method="temporary_streams",
+                            contract=contract,
+                            elapsed_seconds=round(elapsed, 4),
+                            complete_bid_ask=quote.bid is not None and quote.ask is not None,
+                            option_quote=quote,
+                            underlying_price=underlying,
+                            no_order_placed=True,
+                        )
+                        print(
+                            f"experimental entry streams ({elapsed:.2f}s): "
+                            f"underlying {underlying}; {contract.local_name} "
+                            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}"
+                        )
+                    except Exception as exc:  # noqa: BLE001 — production check must still run
+                        elapsed = time.monotonic() - stream_started
+                        diagnostics.write(
+                            "entry_market_data_diagnostic",
+                            ts=broker.now(),
+                            symbol=symbol,
+                            diagnostic_id=diagnostic_id,
+                            regular_entry_window=entry_window,
+                            method="temporary_streams",
+                            contract=contract,
+                            elapsed_seconds=round(elapsed, 4),
+                            complete_bid_ask=False,
+                            error=str(exc),
+                            no_order_placed=True,
+                        )
+                        print(f"experimental entry streams unavailable: {exc}")
+
                     started = time.monotonic()
-                    quote, underlying = broker.get_entry_market_snapshot(contract)
-                    elapsed = time.monotonic() - started
-                    age = max(0.0, (broker.now() - quote.ts).total_seconds())
-                    print(
-                        f"atomic entry snapshot ({elapsed:.2f}s): underlying {underlying}; "
-                        f"{contract.local_name} bid {quote.bid} / ask {quote.ask} / "
-                        f"last {quote.last}; quote age {age:.2f}s"
-                    )
+                    try:
+                        quote, underlying = broker.get_entry_market_snapshot(contract)
+                    except Exception as exc:  # noqa: BLE001 — keep checking the next symbol
+                        elapsed = time.monotonic() - started
+                        diagnostics.write(
+                            "entry_market_data_diagnostic",
+                            ts=broker.now(),
+                            symbol=symbol,
+                            diagnostic_id=diagnostic_id,
+                            regular_entry_window=entry_window,
+                            method="production_snapshot",
+                            contract=contract,
+                            elapsed_seconds=round(elapsed, 4),
+                            complete_bid_ask=False,
+                            error=str(exc),
+                            no_order_placed=True,
+                        )
+                        print(f"production entry snapshot failed after {elapsed:.2f}s: {exc}")
+                    else:
+                        elapsed = time.monotonic() - started
+                        age = max(0.0, (broker.now() - quote.ts).total_seconds())
+                        diagnostics.write(
+                            "entry_market_data_diagnostic",
+                            ts=broker.now(),
+                            symbol=symbol,
+                            diagnostic_id=diagnostic_id,
+                            regular_entry_window=entry_window,
+                            method="production_snapshot",
+                            contract=contract,
+                            elapsed_seconds=round(elapsed, 4),
+                            complete_bid_ask=quote.bid is not None and quote.ask is not None,
+                            option_quote=quote,
+                            underlying_price=underlying,
+                            no_order_placed=True,
+                        )
+                        print(
+                            f"production entry snapshot ({elapsed:.2f}s): "
+                            f"underlying {underlying}; {contract.local_name} "
+                            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}; "
+                            f"quote age {age:.2f}s"
+                        )
         print("\ncheck-ib complete. No orders were placed.")
     finally:
         broker.disconnect()
