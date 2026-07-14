@@ -70,7 +70,7 @@ not for live timing).
 ## Commands
 
 ```bash
-uv run tajator check-ib     # atomic stock/option snapshot on client 118 — places NO orders
+uv run tajator check-ib     # compare entry market-data latency on client 118 — places NO orders
 uv run tajator test-order   # paper diagnostic: buy 1 lot, watch the fill timeline, sell it back
 uv run tajator test-order --with-stop   # + place/verify/cancel a protective stop mid-trade
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
@@ -139,6 +139,11 @@ bid/ask; sizing uses ask plus a reserve; and the underlying must still be inside
 the setup zone without having crossed the stop or already moved away. TWS
 requests both facts in one synchronous snapshot and the accepted snapshot is
 carried directly into submission, avoiding a second 10+ second snapshot wait.
+`check-ib` also measures an experimental five-second temporary-stream path
+before the production snapshot and persists paired no-order records under
+`logs/diagnostics/`. After-hours missing option bid/ask is reported but cannot
+qualify the stream candidate; production remains unchanged until the frozen
+multi-session latency and quote-validity gate passes.
 Orders remain DAY market orders. Risk-removing exits submit immediately and are
 never blocked or delayed by a missing or wide quote. Entries journal their
 accepted snapshot; every order journals its status timeline and fill latency. A
