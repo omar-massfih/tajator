@@ -70,7 +70,7 @@ not for live timing).
 ## Commands
 
 ```bash
-uv run tajator check-ib     # connectivity: bars, chain, quote — places NO orders
+uv run tajator check-ib     # atomic stock/option snapshot on client 118 — places NO orders
 uv run tajator test-order   # paper diagnostic: buy 1 lot, watch the fill timeline, sell it back
 uv run tajator test-order --with-stop   # + place/verify/cancel a protective stop mid-trade
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
@@ -110,11 +110,14 @@ for every configured symbol plus `EXECUTION_LIVE_CONFIRMED=true`.
 
 Live entries are guarded before submission: the option needs a fresh, narrow
 bid/ask; sizing uses ask plus a reserve; and the underlying must still be inside
-the setup zone without having crossed the stop or already moved away. Orders
-remain DAY market orders. Risk-removing exits are never blocked by a missing or
-wide quote. Every order journals its arrival quote, status timeline, latency,
-fill slippage, and underlying price; a slow, slipped, or over-budget confirmed
-fill is adopted and managed but activates the kill switch against new entries.
+the setup zone without having crossed the stop or already moved away. TWS
+requests both facts in one synchronous snapshot and the accepted snapshot is
+carried directly into submission, avoiding a second 10+ second snapshot wait.
+Orders remain DAY market orders. Risk-removing exits submit immediately and are
+never blocked or delayed by a missing or wide quote. Entries journal their
+accepted snapshot; every order journals its status timeline and fill latency. A
+slow, slipped, or over-budget confirmed fill is adopted and managed but
+activates the kill switch against new entries.
 
 With `PROTECTIVE_STOP=true`, every entry also rests a GTC market sell at IB,
 triggered by the *underlying* crossing the plan's stop price. The in-loop mental
