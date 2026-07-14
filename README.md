@@ -334,9 +334,11 @@ Optional multi-timeframe context (`MULTI_TIMEFRAME_CONTEXT=true`) keeps entries
 and stops on the 1-minute chart while adding completed daily trend/ATR/reference
 levels and 09:30-aligned 5-minute structure. Daily levels are context only. The
 forming 5-minute candle is labeled as incomplete, and higher-timeframe evidence
-only ranks already-valid candidates; it never creates or vetoes a setup. The
-feature defaults off until its underlying-only A/B results pass the documented
-expectancy, drawdown, and trade-retention gate.
+only ranks already-valid candidates; it never creates or vetoes a setup. A
+frozen AAPL July 2025-June 2026 underlying-only A/B produced 158 exactly
+identical trade records in each arm, so rank-only context was behaviorally inert
+and failed promotion. The feature remains off; do not enable it as an alleged
+improvement without a new, independently declared hypothesis and holdout.
 
 ## Safety
 
