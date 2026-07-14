@@ -2,6 +2,7 @@ import pytest
 from conftest import ts, walk
 
 from tajator.broker.backtest import BacktestBroker
+from tajator.broker.base import ChainParams, Fill
 from tajator.models import SelectedContract
 
 CONTRACT = SelectedContract(symbol="SPY", expiry="20260710", strike=500.0, right="C")
@@ -89,3 +90,33 @@ def test_execution_model_is_adverse_on_both_sides_and_charges_fees(tmp_path):
     sell = broker.sell_option(CONTRACT, 1)
     assert buy.premium == 2.03 and sell.premium == 1.97
     assert buy.fee == 1.30 and sell.fee == 1.0
+
+
+def test_option_panel_reprices_adjacent_strikes_and_next_expiry_at_same_times(tmp_path):
+    contracts = [
+        ("20260710", 499, "C", 4.0, 4.5),
+        ("20260710", 501, "C", 2.0, 2.2),
+        ("20260717", 500, "C", 5.0, 5.3),
+    ]
+    for expiry, strike, right, entry, exit_ in contracts:
+        path = tmp_path / "SPY" / "options" / f"{expiry}_{strike}{right}_2026-07-06.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "ts,open,high,low,close,volume\n"
+            f"2026-07-06T09:31:00-04:00,{entry},{entry},{entry},{entry},10\n"
+            f"2026-07-06T09:32:00-04:00,{exit_},{exit_},{exit_},{exit_},10\n"
+        )
+    broker = BacktestBroker(_bars(), ib=None, cache_dir=tmp_path)
+    fills = [
+        ("BUY", CONTRACT, Fill(premium=3.0, qty=1, ts=ts(9, 30))),
+        ("SELL", CONTRACT, Fill(premium=3.2, qty=1, ts=ts(9, 31))),
+    ]
+    chain = ChainParams(
+        expirations=["20260710", "20260717"], strikes=[499.0, 500.0, 501.0]
+    )
+    panel, missing = broker.reprice_option_panel(fills, chain)
+
+    assert [fill.premium for _, _, fill in panel["itm_1_near"]] == [4.0, 4.5]
+    assert [fill.premium for _, _, fill in panel["otm_1_near"]] == [2.0, 2.2]
+    assert [fill.premium for _, _, fill in panel["atm_next_expiry"]] == [5.0, 5.3]
+    assert all(not items for items in missing.values())

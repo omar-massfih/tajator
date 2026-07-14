@@ -64,15 +64,17 @@ def _underlying_cache_path(cache_dir: Path, symbol: str, day: date) -> Path:
     return cache_dir / symbol / f"{day.isoformat()}.csv"
 
 
-def ensure_underlying_bars(ib, symbol: str, day: date, cache_dir: Path) -> list[Bar]:
+def ensure_underlying_bars(
+    ib, symbol: str, day: date, cache_dir: Path, *, refresh: bool = False
+) -> list[Bar]:
     """1-min underlying bars for one session, cached to disk after the first fetch."""
     path = _underlying_cache_path(cache_dir, symbol, day)
-    if path.exists():
+    if path.exists() and not refresh:
         # IB may answer a holiday request with the preceding session. Never
         # replay those bars under the requested date.
         return [b for b in _read_csv(path) if b.ts.astimezone(ET).date() == day]
     if ib is None:
-        return []
+        return [b for b in _read_csv(path) if b.ts.astimezone(ET).date() == day] if path.exists() else []
     end = datetime.combine(day, datetime.min.time(), tzinfo=ET).replace(hour=20)
     raw = ib.ib.reqHistoricalData(
         ib._underlying(symbol),
@@ -100,7 +102,7 @@ def ensure_underlying_bars(ib, symbol: str, day: date, cache_dir: Path) -> list[
 def fetch_daily_series(ib, symbol: str, start: date, end: date) -> list[Bar]:
     """One historical-data call for daily OHLC covering the whole window (plus a lookback pad),
     used to derive each day's *previous* session high/low without re-fetching per day."""
-    pad_days = (end - start).days + 10
+    pad_days = (end - start).days + 140
     stop = datetime.combine(end, datetime.min.time(), tzinfo=ET).replace(hour=20)
     raw = ib.ib.reqHistoricalData(
         ib._underlying(symbol),
@@ -120,6 +122,35 @@ def fetch_daily_series(ib, symbol: str, start: date, end: date) -> list[Bar]:
         )
         for b in raw
     ]
+
+
+def daily_series_from_underlying_cache(cache_dir: Path, symbol: str) -> list[Bar]:
+    """Aggregate cached minute sessions into daily bars for causal cached research."""
+    daily: list[Bar] = []
+    symbol_dir = cache_dir / symbol
+    if not symbol_dir.exists():
+        return daily
+    for path in sorted(symbol_dir.glob("????-??-??.csv")):
+        bars = _read_csv(path)
+        session = [
+            bar for bar in bars
+            if (bar.ts.astimezone(ET).hour, bar.ts.astimezone(ET).minute) >= (9, 30)
+            and (bar.ts.astimezone(ET).hour, bar.ts.astimezone(ET).minute) <= (16, 0)
+        ]
+        if not session:
+            continue
+        day = session[0].ts.astimezone(ET).date()
+        daily.append(
+            Bar(
+                ts=datetime.combine(day, datetime.min.time(), tzinfo=ET),
+                open=session[0].open,
+                high=max(bar.high for bar in session),
+                low=min(bar.low for bar in session),
+                close=session[-1].close,
+                volume=sum(bar.volume for bar in session),
+            )
+        )
+    return daily
 
 
 def prev_day_range_for(daily_series: list[Bar], day: date) -> tuple[float | None, float | None]:

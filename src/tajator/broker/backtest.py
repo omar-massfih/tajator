@@ -29,17 +29,20 @@ class BacktestBroker(StubBroker):
         bars: list[Bar],
         prev_day_high: float | None = None,
         prev_day_low: float | None = None,
+        daily_bars: list[Bar] | None = None,
         *,
         ib=None,
         cache_dir: Path | None = None,
+        chain_override: ChainParams | None = None,
         half_spread_pct: float = 0.0,
         slippage_cents: float = 0.0,
         commission_per_contract: float = 0.0,
         min_commission_per_order: float = 0.0,
     ):
-        super().__init__(bars, prev_day_high, prev_day_low)
+        super().__init__(bars, prev_day_high, prev_day_low, daily_bars=daily_bars)
         self._ib = ib
         self._cache_dir = cache_dir
+        self._chain_override = chain_override
         self._option_series: dict[tuple, list[Bar] | None] = {}
         self.half_spread_pct = half_spread_pct
         self.slippage_cents = slippage_cents
@@ -57,6 +60,8 @@ class BacktestBroker(StubBroker):
         IBBroker). Expirations still have to be synthesized — today's chain no
         longer lists the historical expirations a past session traded — so we
         keep StubBroker's near-Friday logic anchored on the backtest day."""
+        if self._chain_override is not None:
+            return self._chain_override
         if self._ib is None:
             return super().get_option_chain(symbol)
         strikes = self._ib.get_option_chain(symbol).strikes or self._chain.strikes
@@ -112,6 +117,88 @@ class BacktestBroker(StubBroker):
         fill = Fill(premium=round(premium, 2), qty=qty, ts=self.now(), fee=round(fee, 2))
         self.fills.append((side, contract, fill))
         return fill
+
+    def _counterfactual_fill(
+        self, contract: SelectedContract, side: str, template: Fill
+    ) -> Fill:
+        """Price another contract at the base fill's exact decision timestamp."""
+        series = self._series_for(contract)
+        reference = self._fill_price(series, template.ts) if series else None
+        if reference is None:
+            day = self.now().astimezone(ET).date()
+            raise RuntimeError(
+                f"no historical option data for {contract.local_name} on {day} at "
+                f"{template.ts.isoformat()}"
+            )
+        adverse = reference * self.half_spread_pct + self.slippage_cents / 100
+        premium = reference + adverse if side == "BUY" else max(0.01, reference - adverse)
+        fee = max(self.min_commission_per_order, template.qty * self.commission_per_contract)
+        return template.model_copy(update={"premium": round(premium, 2), "fee": round(fee, 2)})
+
+    @staticmethod
+    def _panel_contracts(
+        base: SelectedContract, chain: ChainParams
+    ) -> dict[str, SelectedContract | None]:
+        strikes = sorted(set(chain.strikes))
+        expirations = sorted(set(chain.expirations))
+        if not strikes:
+            return {"itm_1_near": None, "otm_1_near": None, "atm_next_expiry": None}
+        index = min(range(len(strikes)), key=lambda i: abs(strikes[i] - base.strike))
+        itm_index = index - 1 if base.right == "C" else index + 1
+        otm_index = index + 1 if base.right == "C" else index - 1
+        later = [expiry for expiry in expirations if expiry > base.expiry]
+
+        def at_strike(candidate_index: int) -> SelectedContract | None:
+            if not 0 <= candidate_index < len(strikes):
+                return None
+            return base.model_copy(update={"strike": strikes[candidate_index], "con_id": None})
+
+        return {
+            "itm_1_near": at_strike(itm_index),
+            "otm_1_near": at_strike(otm_index),
+            "atm_next_expiry": (
+                base.model_copy(update={"expiry": later[0], "con_id": None}) if later else None
+            ),
+        }
+
+    def reprice_option_panel(
+        self,
+        fills: list[tuple[str, SelectedContract, Fill]],
+        chain: ChainParams,
+    ) -> tuple[dict[str, list[tuple[str, SelectedContract, Fill]]], dict[str, list[dict]]]:
+        """Reprice fixed contract variants without changing signals, times, or quantities."""
+        variants = {name: [] for name in ("itm_1_near", "otm_1_near", "atm_next_expiry")}
+        missing = {name: [] for name in variants}
+        grouped: dict[tuple, list[tuple[str, SelectedContract, Fill]]] = {}
+        for item in fills:
+            _, contract, _ = item
+            key = (contract.symbol, contract.expiry, contract.strike, contract.right)
+            grouped.setdefault(key, []).append(item)
+
+        for group in grouped.values():
+            base = group[0][1]
+            contracts = self._panel_contracts(base, chain)
+            for name, alternative in contracts.items():
+                if alternative is None:
+                    missing[name].append({
+                        "base_contract": base.local_name,
+                        "reason": "no listed adjacent strike or later expiration",
+                    })
+                    continue
+                try:
+                    repriced = [
+                        (side, alternative, self._counterfactual_fill(alternative, side, fill))
+                        for side, _, fill in group
+                    ]
+                except RuntimeError as exc:
+                    missing[name].append({
+                        "base_contract": base.local_name,
+                        "alternative_contract": alternative.local_name,
+                        "reason": str(exc),
+                    })
+                    continue
+                variants[name].extend(repriced)
+        return variants, missing
 
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._execution_fill(contract, qty, "BUY")

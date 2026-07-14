@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime
@@ -16,11 +17,46 @@ from .notify import NullNotifier, TelegramNotifier
 ET = ZoneInfo("America/New_York")
 
 
+def _runtime_policy_metadata(settings, deterministic: bool) -> dict:
+    """Journal enough identity to keep incompatible execution samples separate."""
+    from .backtest.forward import _definition, _source_fingerprint
+
+    return {
+        "policy_mode": "deterministic" if deterministic else "llm",
+        "validation_compatible": deterministic,
+        "source_fingerprint": _source_fingerprint(),
+        "cohort_fingerprints": {
+            symbol: _definition(symbol, settings)["fingerprint"]
+            for symbol in settings.symbols
+        } if deterministic else {},
+        "symbols": settings.symbols,
+        "llm_model": None if deterministic else settings.llm_model,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="tajator")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="live minute loop against IBKR (paper by default)")
+    run = sub.add_parser("run", help="live minute loop against IBKR (paper by default)")
+    run_policy = run.add_mutually_exclusive_group()
+    run_policy.add_argument(
+        "--deterministic", dest="deterministic", action="store_true", default=True,
+        help="use the frozen rule-follower (default; retained as an explicit compatibility flag)",
+    )
+    run_policy.add_argument(
+        "--llm", dest="deterministic", action="store_false",
+        help="opt into experimental LLM entry and management decisions",
+    )
+    shadow = sub.add_parser(
+        "shadow",
+        help="run deterministic live-quote simulation against TWS — never places orders",
+    )
+    shadow.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
+    shadow.add_argument(
+        "--client-id", type=int, default=116,
+        help="dedicated TWS market-data client ID (default: 116)",
+    )
     sub.add_parser("check-ib", help="connectivity check: bars, chain, quote — no orders")
     sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
@@ -30,7 +66,10 @@ def main() -> None:
     )
     test_order.add_argument("--symbol", default=None, help="defaults to the first configured SYMBOLS entry")
     test_order.add_argument("--qty", type=int, default=1)
-    test_order.add_argument("--wait", type=int, default=180, help="seconds to wait for each fill")
+    test_order.add_argument(
+        "--wait", type=int, default=None,
+        help="override ORDER_TIMEOUT_S for this diagnostic",
+    )
     test_order.add_argument(
         "--with-stop", action="store_true",
         help="also place, verify, and cancel a protective stop while the position is open",
@@ -70,11 +109,119 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
+    audit = sub.add_parser(
+        "edge-audit",
+        help="audit whether a backtest is stable and out-of-sample enough to support an edge",
+    )
+    audit.add_argument("report", type=Path)
+    audit_role = audit.add_mutually_exclusive_group()
+    audit_role.add_argument(
+        "--validation-start",
+        help="YYYY-MM-DD split; only trades on/after this date are judged as holdout",
+    )
+    audit_role.add_argument(
+        "--validation-only", action="store_true",
+        help="declare the entire report a frozen out-of-sample validation run",
+    )
+    audit.add_argument("--min-trades", type=int, default=50)
+
+    forward = sub.add_parser(
+        "forward-validate",
+        help="capture one completed TWS session into a frozen options-validation cohort",
+    )
+    forward.add_argument("--name", required=True, help="immutable cohort name")
+    forward.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
+    forward.add_argument("--date", required=True, help="completed session date, YYYY-MM-DD")
+    forward.add_argument("--cache-dir", type=Path, default=None)
+    forward.add_argument(
+        "--client-id", type=int, default=117,
+        help="dedicated read-only TWS API client ID (default: 117)",
+    )
+
+    latest = sub.add_parser(
+        "forward-latest",
+        help="discover and capture the latest completed TWS session into a frozen cohort",
+    )
+    latest.add_argument("--name", required=True, help="immutable cohort name")
+    latest.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
+    latest.add_argument("--cache-dir", type=Path, default=None)
+    latest.add_argument("--client-id", type=int, default=117)
+    latest.add_argument("--lookback-days", type=int, default=7)
+
+    panel = sub.add_parser(
+        "option-panel-compare",
+        help="compare captured ITM/ATM/OTM and expiry variants at identical signal times",
+    )
+    panel.add_argument("report", type=Path)
+    panel.add_argument("--min-pairs", type=int, default=50)
+
+    calibration = sub.add_parser(
+        "execution-calibrate",
+        help="compare journaled paper fills with historical option-bar execution assumptions",
+    )
+    calibration.add_argument("journal", type=Path)
+    calibration.add_argument("--symbol", required=True)
+    calibration.add_argument("--cache-dir", type=Path, default=None)
+    calibration.add_argument("--client-id", type=int, default=117)
+    calibration.add_argument("--output", type=Path, default=None)
+
+    shadow_report = sub.add_parser(
+        "shadow-report",
+        help="build an edge-auditable report from no-order shadow journals",
+    )
+    shadow_report.add_argument(
+        "path", type=Path, help="shadow journal JSONL file or directory"
+    )
+    shadow_report.add_argument("--symbol", required=True)
+    shadow_report.add_argument("--output", type=Path, default=None)
+
+    tournament = sub.add_parser(
+        "historical-signal-tournament",
+        help="select and validate preregistered intraday signals on cached TWS stock bars",
+    )
+    tournament.add_argument("--cache-dir", type=Path, default=None)
+    tournament.add_argument("--output", type=Path, default=None)
+
+    followup = sub.add_parser(
+        "historical-signal-followup",
+        help="validate the preregistered opening-drive fade historical follow-up",
+    )
+    followup.add_argument("--cache-dir", type=Path, default=None)
+    followup.add_argument("--output", type=Path, default=None)
+
+    daily_fetch = sub.add_parser(
+        "historical-daily-fetch",
+        help="fetch long-run TWS daily stock bars for the preregistered swing study",
+    )
+    daily_fetch.add_argument(
+        "--symbols", default="AAPL,META,MSFT,SPY,AMZN,GOOGL,NVDA,QQQ"
+    )
+    daily_fetch.add_argument("--start", default="2017-01-01")
+    daily_fetch.add_argument("--end", default="2026-06-30")
+    daily_fetch.add_argument("--cache-dir", type=Path, default=None)
+    daily_fetch.add_argument("--client-id", type=int, default=117)
+
+    daily_tournament = sub.add_parser(
+        "historical-daily-tournament",
+        help="run the preregistered sequential swing-signal tournament",
+    )
+    daily_tournament.add_argument("--cache-dir", type=Path, default=None)
+    daily_tournament.add_argument("--output", type=Path, default=None)
+
+    focused = sub.add_parser(
+        "historical-aapl-focus",
+        help="run the preregistered AAPL-first temporal holdout on fresh TWS history",
+    )
+    focused.add_argument("--cache-dir", type=Path, default=Path("data/tws-focused"))
+    focused.add_argument("--output", type=Path, default=None)
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     if args.command == "run":
-        cmd_run()
+        cmd_run(args)
+    elif args.command == "shadow":
+        cmd_shadow(args)
     elif args.command == "check-ib":
         cmd_check_ib()
     elif args.command == "test-order":
@@ -86,6 +233,28 @@ def main() -> None:
     elif args.command == "backtest-compare":
         from .backtest.compare import print_comparison
         print_comparison(args.reports)
+    elif args.command == "edge-audit":
+        cmd_edge_audit(args)
+    elif args.command == "forward-validate":
+        cmd_forward_validate(args)
+    elif args.command == "forward-latest":
+        cmd_forward_latest(args)
+    elif args.command == "option-panel-compare":
+        cmd_option_panel_compare(args)
+    elif args.command == "execution-calibrate":
+        cmd_execution_calibrate(args)
+    elif args.command == "shadow-report":
+        cmd_shadow_report(args)
+    elif args.command == "historical-signal-tournament":
+        cmd_historical_signal_tournament(args)
+    elif args.command == "historical-signal-followup":
+        cmd_historical_signal_followup(args)
+    elif args.command == "historical-daily-fetch":
+        cmd_historical_daily_fetch(args)
+    elif args.command == "historical-daily-tournament":
+        cmd_historical_daily_tournament(args)
+    elif args.command == "historical-aapl-focus":
+        cmd_historical_aapl_focus(args)
     else:
         cmd_replay(args)
 
@@ -113,20 +282,25 @@ def _ib_broker(settings=None, notifier=None):
     return settings, broker
 
 
-def cmd_run() -> None:
+def cmd_run(args) -> None:
     from .graph.nodes import RuntimeContext
     from .llm.decide import build_llm
     from .models import MorningBriefing
     from .runner import LiveRunner, TradingSession
-    from .startup import check_kill_switch, run_startup_checks
+    from .startup import check_execution_diagnostics, check_kill_switch, run_startup_checks
     from .state_store import StateStore
 
     settings = load_settings()
     notifier = _notifier(settings)
     check_kill_switch(settings, notifier)
+    check_execution_diagnostics(settings)
     settings, broker = _ib_broker(settings, notifier)
     journal = Journal(settings.log_dir)
     broker.journal = journal  # order timelines land next to the trade records
+    journal.write(
+        "policy_start", ts=broker.now(),
+        **_runtime_policy_metadata(settings, args.deterministic),
+    )
     store = StateStore(settings.state_file)
     try:
         # Refuse on resting orders or positions that persisted state cannot
@@ -135,18 +309,21 @@ def cmd_run() -> None:
     except SystemExit:
         broker.disconnect()
         raise
-    try:
-        # fail fast on a missing/invalid API key instead of waiting all day
-        llm = build_llm(settings.llm_model)
-        prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
-    except Exception as exc:  # noqa: BLE001
-        broker.disconnect()
-        sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
+    llm = prep_llm = None
+    if not args.deterministic:
+        try:
+            # fail fast on a missing/invalid API key instead of waiting all day
+            llm = build_llm(settings.llm_model)
+            prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
+        except Exception as exc:  # noqa: BLE001
+            broker.disconnect()
+            sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
     today = broker.now().date()
     sessions = [
         TradingSession(
             RuntimeContext(
                 settings=settings, broker=broker, journal=journal, symbol=symbol,
+                use_llm=not args.deterministic,
                 notifier=notifier, _llm=llm, _prep_llm=prep_llm,
             ),
             store=store,
@@ -159,6 +336,66 @@ def cmd_run() -> None:
         LiveRunner(sessions).run()
     finally:
         broker.disconnect()
+
+
+def cmd_shadow(args) -> None:
+    """Run the production graph on live TWS data with a broker that cannot order."""
+    from .broker.shadow import ShadowBroker
+    from .graph.nodes import RuntimeContext
+    from .runner import LiveRunner, TradingSession
+    from .state_store import PersistedSession, StateStore
+
+    base = load_settings()
+    shadow_dir = base.log_dir / "shadow"
+    settings = base.model_copy(
+        update={
+            "ib_client_id": args.client_id,
+            "protective_stop_enabled": False,
+            "log_dir": shadow_dir,
+            "state_file": shadow_dir / "state.json",
+            "kill_switch_file": shadow_dir / "KILL",
+        }
+    )
+    _, market = _ib_broker(settings, NullNotifier())
+    journal = Journal(shadow_dir)
+    broker = ShadowBroker(market, settings, journal)
+    store = StateStore(settings.state_file)
+    symbol = (args.symbol or settings.symbols[0]).upper()
+    today = broker.now().date()
+    restored = None
+    try:
+        persisted = store.load()
+        if persisted is not None and persisted.trading_day == today:
+            restored = persisted.sessions.get(symbol)
+        elif persisted is not None:
+            # An overnight shadow position is deliberately not adopted: this
+            # strategy is intraday and a stale simulation must not contaminate
+            # a new session's evidence.
+            restored = PersistedSession()
+        journal.write(
+            "shadow_started", symbol=symbol, deterministic=True,
+            client_id=args.client_id, no_order_placed=True,
+        )
+        print(
+            "=== TAJATOR SHADOW | LIVE TWS DATA | DETERMINISTIC | NO ORDERS ===\n"
+            f"symbol: {symbol}  journal/state: {shadow_dir}"
+        )
+        session = TradingSession(
+            RuntimeContext(
+                settings=settings,
+                broker=broker,
+                journal=journal,
+                symbol=symbol,
+                use_llm=False,
+                notifier=NullNotifier(),
+            ),
+            store=store,
+            restored=restored,
+            day=today,
+        )
+        LiveRunner([session]).run()
+    finally:
+        market.disconnect()
 
 
 def cmd_check_ib() -> None:
@@ -194,38 +431,23 @@ def cmd_check_ib() -> None:
 
 
 def cmd_test_order(args) -> None:
-    """Supervised paper diagnostic (see the 2026-07-08 incident): observe the
-    natural fill latency of a market order WITHOUT the timeout-cancel path, so
-    slow paper-sim fills can be told apart from lost events. Watch TWS while
-    this runs. Exit code 0 only when the full round trip completed."""
-    import time as time_mod
-
-    from ib_async import MarketOrder
-
+    """Supervised paper round trip through the production market-order path."""
     from .trade.contracts import select_contract
+    from .trade.execution import size_entry, validate_option_liquidity
 
     settings = load_settings()
     if settings.trading_mode != "paper":
         sys.exit("test-order is a paper diagnostic — refusing to run in live mode.")
+    if args.wait is not None:
+        settings = settings.model_copy(update={"order_timeout_s": args.wait})
     settings, broker = _ib_broker(settings)
     broker.journal = Journal(settings.log_dir)
     symbol = (args.symbol or settings.symbols[0]).upper()
-
-    def stream(trade, wait_s: int) -> float | None:
-        """Print status/log lines as they arrive; returns seconds-to-done or None."""
-        start = time_mod.monotonic()
-        seen = 0
-        while True:
-            for e in trade.log[seen:]:
-                print(f"    {e.time.astimezone(ET):%H:%M:%S}  {e.status:<14} {e.message}")
-            seen = len(trade.log)
-            if trade.isDone():
-                return time_mod.monotonic() - start
-            if time_mod.monotonic() - start >= wait_s:
-                return None
-            broker.ib.waitOnUpdate(timeout=1.0)
-
-    ok = False
+    passed = False
+    failure = "diagnostic did not complete"
+    buy_fill = sell_fill = None
+    contract = None
+    diagnostic_failures: list[str] = []
     try:
         print(f"accounts: {broker.ib.managedAccounts()}")
         print(f"market data type requested: {settings.market_data_type}, "
@@ -238,60 +460,78 @@ def cmd_test_order(args) -> None:
         contract = select_contract(chain, symbol, spot, "call", broker.now())
         if contract is None:
             sys.exit(f"no usable {symbol} contract in the chain")
-        opt = broker._option(contract)
-        [ticker] = broker.ib.reqTickers(opt)
-        print(f"{contract.local_name}: bid {ticker.bid} / ask {ticker.ask} / last {ticker.last} "
-              f"({'DELAYED' if broker.is_delayed_data else 'live'} quotes)")
-        if broker.is_delayed_data:
-            print("!!! quotes are DELAYED — expect slow/none paper fills; fix the market "
-                  "data subscription before trusting entry timing.")
+        quote = broker.get_option_quote(contract)
+        print(
+            f"{contract.local_name}: bid {quote.bid} / ask {quote.ask} / last {quote.last} "
+            f"({'DELAYED' if quote.delayed else 'live'} quotes)"
+        )
+        quote_failure = validate_option_liquidity(quote, settings)
+        if quote_failure:
+            raise RuntimeError(quote_failure)
+        affordable = size_entry(
+            quote.ask, settings, reserve_pct=settings.entry_budget_reserve_pct
+        )
+        if args.qty <= 0 or args.qty > affordable:
+            raise RuntimeError(
+                f"requested {args.qty} contract(s), but ask-plus-reserve budget allows {affordable}"
+            )
 
-        print(f"\nplacing BUY {args.qty}x {contract.local_name} (market, NO timeout cancel) ...")
-        buy = MarketOrder("BUY", args.qty)
-        buy.orderRef = f"{settings.order_ref_prefix}-test:{symbol}"
-        buy_trade = broker.ib.placeOrder(opt, buy)
-        took = stream(buy_trade, args.wait)
-        broker._journal_order_timeline(buy_trade, f"test-order BUY {args.qty}x {contract.local_name}")
-        if took is None or buy_trade.orderStatus.status != "Filled":
-            print(f"\nNOT FILLED within {args.wait}s (status {buy_trade.orderStatus.status}).")
-            print("The order was NOT auto-cancelled — watch it in TWS and cancel it there "
-                  "once you have seen how long the paper engine takes.")
-            sys.exit(1)
-        filled_qty = int(buy_trade.orderStatus.filled)
-        print(f"filled {filled_qty}x @ {buy_trade.orderStatus.avgFillPrice} in {took:.1f}s")
+        print(f"\nplacing BUY {args.qty}x {contract.local_name} through production market path ...")
+        buy_fill = broker.buy_option(contract, args.qty)
+        print(
+            f"filled {buy_fill.qty}x @ {buy_fill.premium:.2f} in "
+            f"{buy_fill.execution_quality.latency_s:.1f}s"
+        )
+        diagnostic_failures.extend(buy_fill.execution_quality.breaches)
+        if buy_fill.qty != args.qty:
+            diagnostic_failures.append(f"entry filled only {buy_fill.qty}/{args.qty}")
+        remaining = buy_fill.qty
 
         if args.with_stop:
             stop_price = round(spot - 1.00, 2)
             print(f"\nplacing protective stop (SELL if {symbol} <= {stop_price}, GTC) ...")
             stop = broker.place_protective_stop(
-                contract, filled_qty, stop_price, "call",
+                contract, buy_fill.qty, stop_price, "call",
                 f"{settings.order_ref_prefix}-stop:{symbol}",
             )
             print(f"placed order {stop.order_id} (ref {stop.order_ref}) — check it shows in TWS")
             status = broker.poll_protective_stop(contract, stop)
             print(f"poll: {status.state} (working {status.working_qty})")
-            result = broker.cancel_protective_stop(contract, stop, expected_held=filled_qty)
+            result = broker.cancel_protective_stop(contract, stop, expected_held=buy_fill.qty)
             print(f"cancel confirmed: cancelled={result.cancelled}, filled={result.filled_qty}")
+            remaining -= result.filled_qty
 
-        print(f"\nselling {filled_qty}x back (market, NO timeout cancel) ...")
-        sell = MarketOrder("SELL", filled_qty)
-        sell.orderRef = f"{settings.order_ref_prefix}-test:{symbol}"
-        sell_trade = broker.ib.placeOrder(opt, sell)
-        took = stream(sell_trade, args.wait)
-        broker._journal_order_timeline(sell_trade, f"test-order SELL {filled_qty}x {contract.local_name}")
-        if took is None or sell_trade.orderStatus.status != "Filled":
-            print(f"\nSELL NOT FILLED within {args.wait}s (status {sell_trade.orderStatus.status}) — "
-                  "the position is still open; close it in TWS.")
-            sys.exit(1)
-        buy_px = float(buy_trade.orderStatus.avgFillPrice)
-        sell_px = float(sell_trade.orderStatus.avgFillPrice)
-        print(f"filled {int(sell_trade.orderStatus.filled)}x @ {sell_px} in {took:.1f}s")
-        print(f"\nround trip complete: PnL ${100 * filled_qty * (sell_px - buy_px):+.0f} "
-              "(timelines journaled as order_timeline events)")
-        ok = True
+        if remaining:
+            print(f"\nselling {remaining}x back through production market path ...")
+            sell_fill = broker.sell_option(contract, remaining)
+            print(
+                f"filled {sell_fill.qty}x @ {sell_fill.premium:.2f} in "
+                f"{sell_fill.execution_quality.latency_s:.1f}s"
+            )
+            diagnostic_failures.extend(sell_fill.execution_quality.breaches)
+            if sell_fill.qty != remaining:
+                diagnostic_failures.append(f"exit filled only {sell_fill.qty}/{remaining}")
+        passed = not diagnostic_failures
+        failure = "; ".join(diagnostic_failures) if diagnostic_failures else ""
+        print(
+            f"\nround trip complete: PnL "
+            f"${100 * (sell_fill.qty if sell_fill else 0) * ((sell_fill.premium if sell_fill else 0) - buy_fill.premium):+.0f}"
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostic must persist its failure reason
+        failure = str(exc)
+        print(f"\nexecution diagnostic FAILED: {failure}")
     finally:
+        broker.journal.write(
+            "execution_diagnostic",
+            symbol=symbol,
+            passed=passed,
+            failure=failure,
+            contract=contract,
+            buy=buy_fill.execution_quality if buy_fill is not None else None,
+            sell=sell_fill.execution_quality if sell_fill is not None else None,
+        )
         broker.disconnect()
-    if not ok:
+    if not passed:
         sys.exit(1)
 
 
@@ -333,7 +573,8 @@ def cmd_replay(args) -> None:
     else:
         _, ib = _ib_broker()
         try:
-            day = datetime.strptime(args.date, "%Y-%m-%d").replace(hour=20, tzinfo=ET)
+            requested_day = datetime.strptime(args.date, "%Y-%m-%d").date()
+            day = datetime.combine(requested_day, datetime.min.time(), tzinfo=ET).replace(hour=20)
             raw = ib.ib.reqHistoricalData(
                 ib._underlying(symbol),
                 endDateTime=day,
@@ -352,8 +593,16 @@ def cmd_replay(args) -> None:
             ]
             if not bars:
                 sys.exit(f"IB returned no bars for {args.date}")
-            prev_high, prev_low = ib.get_prev_day_range(symbol)
-            stub = StubBroker(bars, args.prev_high or prev_high, args.prev_low or prev_low)
+            from .backtest.data import fetch_daily_series, prev_day_range_for
+
+            daily_bars = fetch_daily_series(ib, symbol, requested_day, requested_day)
+            prev_high, prev_low = prev_day_range_for(daily_bars, requested_day)
+            stub = StubBroker(
+                bars,
+                args.prev_high or prev_high,
+                args.prev_low or prev_low,
+                daily_bars=daily_bars,
+            )
         finally:
             ib.disconnect()
 
@@ -375,7 +624,12 @@ def cmd_backtest(args) -> None:
 
     from .backtest.runner import print_summary, run_backtest
 
-    settings, ib = _ib_broker()
+    # A cached-only research run must be genuinely offline; connecting to IB
+    # would make the reproducible A/B gate depend on Gateway availability.
+    if args.cached_only:
+        settings, ib = load_settings(), None
+    else:
+        settings, ib = _ib_broker()
     symbol = args.symbol or settings.symbols[0]
     start = dt.strptime(args.start, "%Y-%m-%d").date()
     end = dt.strptime(args.end, "%Y-%m-%d").date()
@@ -391,10 +645,240 @@ def cmd_backtest(args) -> None:
             experiment=args.experiment,
         )
     except Exception as exc:  # noqa: BLE001 — e.g. bad LLM config; fail with a clean message
-        ib.disconnect()
+        if ib is not None:
+            ib.disconnect()
         sys.exit(f"backtest failed: {exc}")
-    ib.disconnect()
+    if ib is not None:
+        ib.disconnect()
     print_summary(report)
+
+
+def cmd_edge_audit(args) -> None:
+    from datetime import date
+
+    from .backtest.audit import load_and_audit, print_audit
+
+    try:
+        validation_start = date.fromisoformat(args.validation_start) if args.validation_start else None
+        audit = load_and_audit(
+            args.report,
+            validation_start=validation_start,
+            validation_only=args.validation_only,
+            min_trades=args.min_trades,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"edge audit failed: {exc}")
+    print_audit(audit)
+
+
+def cmd_forward_validate(args) -> None:
+    from datetime import date
+
+    from .backtest.forward import capture_forward_day
+
+    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
+    settings, ib = _ib_broker(settings)
+    symbol = (args.symbol or settings.symbols[0]).upper()
+    try:
+        day = date.fromisoformat(args.date)
+        record, cumulative = capture_forward_day(
+            name=args.name,
+            symbol=symbol,
+            day=day,
+            settings=settings,
+            ib=ib,
+            cache_dir=args.cache_dir or settings.backtest_cache_dir,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        sys.exit(f"forward validation failed: {exc}")
+    finally:
+        ib.disconnect()
+    print(f"captured {symbol} {day}: {record}")
+    print(f"cumulative validation report: {cumulative}")
+
+
+def cmd_forward_latest(args) -> None:
+    from .backtest.forward import capture_forward_day, latest_completed_session
+
+    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
+    settings, ib = _ib_broker(settings)
+    symbol = (args.symbol or settings.symbols[0]).upper()
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    try:
+        day = latest_completed_session(
+            symbol=symbol,
+            ib=ib,
+            cache_dir=cache_dir,
+            lookback_calendar_days=args.lookback_days,
+        )
+        record, cumulative = capture_forward_day(
+            name=args.name,
+            symbol=symbol,
+            day=day,
+            settings=settings,
+            ib=ib,
+            cache_dir=cache_dir,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        sys.exit(f"forward latest failed: {exc}")
+    finally:
+        ib.disconnect()
+    print(f"latest completed session: {symbol} {day}")
+    print(f"captured: {record}")
+    print(f"cumulative validation report: {cumulative}")
+
+
+def cmd_option_panel_compare(args) -> None:
+    from .backtest.audit import paired_panel_rows, print_option_panel
+
+    try:
+        report = json.loads(args.report.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"option panel comparison failed: {exc}")
+    try:
+        paired_panel_rows(report, min_pairs=args.min_pairs)
+    except ValueError as exc:
+        sys.exit(f"option panel comparison failed: {exc}")
+    print_option_panel(report, min_pairs=args.min_pairs)
+
+
+def cmd_execution_calibrate(args) -> None:
+    from .backtest.audit import calibrate_execution_journal, print_execution_calibration
+
+    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
+    settings, ib = _ib_broker(settings)
+    try:
+        calibration = calibrate_execution_journal(
+            args.journal,
+            symbol=args.symbol,
+            ib=ib,
+            cache_dir=args.cache_dir or settings.backtest_cache_dir,
+            settings=settings,
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        sys.exit(f"execution calibration failed: {exc}")
+    finally:
+        ib.disconnect()
+    output = args.output or (
+        settings.log_dir / "calibrations" /
+        f"{args.journal.stem}_{args.symbol.upper()}.json"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(calibration, indent=2))
+    print_execution_calibration(calibration)
+    print(f"calibration report: {output}")
+
+
+def cmd_shadow_report(args) -> None:
+    from .backtest.audit import build_shadow_report, print_shadow_report, write_report
+
+    try:
+        report = build_shadow_report(args.path, symbol=args.symbol)
+        output = args.output or (
+            args.path if args.path.is_dir() else args.path.parent
+        ) / f"{args.symbol.upper()}_shadow_report.json"
+        write_report(report, output)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"shadow report failed: {exc}")
+    print_shadow_report(report)
+    print(f"shadow report: {output}")
+
+
+def cmd_historical_signal_tournament(args) -> None:
+    from .backtest.historical_signals import (
+        print_tournament,
+        run_tournament,
+        write_tournament,
+    )
+
+    settings = load_settings()
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    output = args.output or settings.log_dir / "research" / "historical-signal-tournament-v1.json"
+    try:
+        report = run_tournament(cache_dir)
+        write_tournament(report, output)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"historical signal tournament failed: {exc}")
+    print_tournament(report)
+    print(f"tournament report: {output}")
+
+
+def cmd_historical_signal_followup(args) -> None:
+    from .backtest.historical_signals import (
+        print_followup,
+        run_opening_drive_fade_followup,
+        write_tournament,
+    )
+
+    settings = load_settings()
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    output = args.output or settings.log_dir / "research" / "opening-drive-fade-followup-v1.json"
+    try:
+        report = run_opening_drive_fade_followup(cache_dir)
+        write_tournament(report, output)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"historical signal follow-up failed: {exc}")
+    print_followup(report)
+    print(f"follow-up report: {output}")
+
+
+def cmd_historical_daily_fetch(args) -> None:
+    from datetime import date
+
+    from .backtest.daily_signals import fetch_daily_history
+
+    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
+    settings, ib = _ib_broker(settings)
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    symbols = tuple(symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip())
+    try:
+        start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
+        if end < start:
+            raise ValueError("--end must not be before --start")
+        for symbol in symbols:
+            path = fetch_daily_history(ib, symbol, start, end, cache_dir)
+            print(f"cached {symbol}: {path}")
+    except (OSError, ValueError, RuntimeError) as exc:
+        sys.exit(f"historical daily fetch failed: {exc}")
+    finally:
+        ib.disconnect()
+
+
+def cmd_historical_daily_tournament(args) -> None:
+    from .backtest.daily_signals import (
+        print_daily_tournament,
+        run_daily_tournament,
+        write_daily_tournament,
+    )
+
+    settings = load_settings()
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    output = args.output or settings.log_dir / "research" / "historical-daily-tournament-v1.json"
+    try:
+        report = run_daily_tournament(cache_dir)
+        write_daily_tournament(report, output)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"historical daily tournament failed: {exc}")
+    print_daily_tournament(report)
+    print(f"daily tournament report: {output}")
+
+
+def cmd_historical_aapl_focus(args) -> None:
+    from .backtest.daily_signals import (
+        print_aapl_focused,
+        run_aapl_focused_holdout,
+        write_daily_tournament,
+    )
+
+    settings = load_settings()
+    output = args.output or settings.log_dir / "research" / "aapl-focused-holdout-v1.json"
+    try:
+        report = run_aapl_focused_holdout(args.cache_dir)
+        write_daily_tournament(report, output)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"AAPL-focused historical holdout failed: {exc}")
+    print_aapl_focused(report)
+    print(f"AAPL-focused report: {output}")
 
 
 if __name__ == "__main__":

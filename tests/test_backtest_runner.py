@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from conftest import walk
 
 from tajator.backtest.runner import run_backtest
+from tajator.broker.base import ChainParams
 from tajator.config import Settings
 from tajator.models import Bar
 
@@ -69,6 +70,8 @@ def test_run_backtest_across_days(tmp_path, monkeypatch):
     assert payload["metadata"]["use_llm"] is False
     assert payload["metadata"]["execution_model"]["modeled_half_spread_pct"] == 0.01
     assert "approach_band_pct" in payload["metadata"]["strategy_config"]
+    assert payload["metadata"]["strategy_config"]["reaction_lookback_bars"] == 5
+    assert payload["metadata"]["strategy_config"]["long_wick_min_frac"] == 0.25
 
 
 def test_experiment_name_is_sanitized_in_output_path(tmp_path, monkeypatch):
@@ -123,3 +126,57 @@ def test_underlying_only_does_not_request_option_history(tmp_path, monkeypatch):
     assert report.metadata["research_mode"] == "underlying_only"
     assert report.total_trades == 1
     assert report.trades[0].underlying_points is not None
+
+
+def test_forward_chain_snapshot_is_disclosed_and_passed_to_broker(tmp_path, monkeypatch):
+    _seed_cache(tmp_path)
+    observed = []
+    chain = ChainParams(expirations=["20260617"], strikes=[499.0, 500.0, 501.0])
+
+    def capture_chain(self, symbol):
+        observed.append(self._chain_override)
+        return self._chain_override
+
+    monkeypatch.setattr("tajator.broker.backtest.BacktestBroker.get_option_chain", capture_chain)
+    monkeypatch.setattr(
+        "tajator.broker.backtest.ensure_option_bars",
+        lambda ib, contract, day, cache_dir: walk(
+            datetime(day.year, day.month, day.day, 9, 30, tzinfo=ET), [3.0] * 390
+        ),
+    )
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
+    report = run_backtest(
+        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, False, None, tmp_path,
+        chain_override=chain,
+    )
+
+    assert observed and all(value == chain for value in observed)
+    assert report.metadata["option_chain_model"]["source"] == "captured_tws_snapshot"
+    assert report.metadata["option_chain_model"]["expirations"] == ["20260617"]
+
+
+def test_option_panel_is_persisted_with_counterfactual_trades(tmp_path, monkeypatch):
+    _seed_cache(tmp_path)
+    chain = ChainParams(
+        expirations=["20260617", "20260619"], strikes=[499.0, 500.0, 501.0]
+    )
+    monkeypatch.setattr(
+        "tajator.broker.backtest.ensure_option_bars",
+        lambda ib, contract, day, cache_dir: walk(
+            datetime(day.year, day.month, day.day, 9, 30, tzinfo=ET), [3.0] * 390
+        ),
+    )
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
+    report = run_backtest(
+        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, False, None, tmp_path,
+        chain_override=chain, option_panel=True,
+    )
+
+    assert set(report.option_panel) == {"atm_next_expiry", "itm_1_near", "otm_1_near"}
+    assert all(data["total_trades"] == 1 for data in report.option_panel.values())
+    assert all(not data["missing_contracts"] for data in report.option_panel.values())
+    payload = json.loads(
+        (tmp_path / "logs" / "backtests" /
+         f"SPY_{DAY_WITH_TRADE}_{DAY_WITH_TRADE}_baseline.json").read_text()
+    )
+    assert payload["option_panel"]["itm_1_near"]["total_trades"] == 1

@@ -60,6 +60,12 @@ class BacktestReport:
     underlying_wins: int = 0
     underlying_losses: int = 0
     underlying_win_rate: float = 0.0
+    underlying_expectancy: float = 0.0
+    underlying_equity_curve: list[tuple[date, float]] = field(default_factory=list)
+    max_underlying_drawdown: float = 0.0
+    # Counterfactual option contracts priced at the base strategy's exact fill
+    # timestamps. Values are JSON-ready variant ledgers + summaries.
+    option_panel: dict[str, dict] = field(default_factory=dict)
 
 
 def _trades_for_day(
@@ -191,6 +197,9 @@ def build_report(
     report.underlying_win_rate = round(len(point_wins) / len(point_results), 4) if point_results else 0.0
     report.avg_underlying_win = round(sum(point_wins) / len(point_wins), 4) if point_wins else 0.0
     report.avg_underlying_loss = round(sum(point_losses) / len(point_losses), 4) if point_losses else 0.0
+    report.underlying_expectancy = (
+        round(report.total_underlying_points / len(point_results), 4) if point_results else 0.0
+    )
 
     cumulative = 0.0
     peak = 0.0
@@ -201,4 +210,19 @@ def build_report(
         max_dd = max(max_dd, peak - cumulative)
         report.equity_curve.append((day, round(cumulative, 2)))
     report.max_drawdown = round(max_dd, 2)
+
+    point_cumulative = 0.0
+    point_peak = 0.0
+    point_max_dd = 0.0
+    for day in sorted(fills_by_day):
+        day_points = sum(
+            trade.underlying_points or 0.0
+            for trade in report.trades
+            if trade.day == day and trade.closed
+        )
+        point_cumulative += day_points
+        point_peak = max(point_peak, point_cumulative)
+        point_max_dd = max(point_max_dd, point_peak - point_cumulative)
+        report.underlying_equity_curve.append((day, round(point_cumulative, 4)))
+    report.max_underlying_drawdown = round(point_max_dd, 4)
     return report
