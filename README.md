@@ -77,6 +77,8 @@ uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
     --prev-high 503.5 --prev-low 497.0   # bundled synthetic day, no IB/LLM needed
 uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay with the LLM
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-llm
+uv run tajator backtest --symbol AAPL --start 2026-07-14 --end 2026-07-14 \
+    --no-llm --tws-chain-snapshot --experiment exact-current-day  # completed day only
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
     --no-llm --underlying-only --experiment baseline  # long-window signal research
 uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_risk-cap.json
@@ -122,6 +124,15 @@ report checks the candidate's absolute confidence interval, paired daily
 improvement interval, coverage, positive months and half-years, drawdown, and
 prints every changed strategy setting. Use a fresh isolated TWS cache for the
 baseline and `--cached-only` for the candidate so both see identical bars.
+
+Ordinary long-window backtests synthesize Friday expirations around the strike
+grid available from TWS; that is appropriate for stock-signal research but not
+for auditing today's selected contract. After the current session is complete,
+`--tws-chain-snapshot` refreshes the full stock session, refuses incomplete
+coverage, captures the actual TWS expirations and strikes, and prices the exact
+contract from its historical option bars. It is deliberately restricted to one
+current-day online diagnostic and must never be presented as prospective
+evidence unless the cohort itself was registered beforehand.
 
 Live entries are guarded before submission: the option needs a fresh, narrow
 bid/ask; sizing uses ask plus a reserve; and the underlying must still be inside
