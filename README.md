@@ -87,6 +87,7 @@ uv run tajator strategy-compare \
     --output logs/research/msft-risk-cap-holdout-v1.json
 uv run tajator edge-audit logs/backtests/AAPL_2025-07-01_2026-06-30_baseline.json \
     --validation-start 2026-01-01  # judge only a pre-declared holdout
+uv run tajator forward-init --name aapl-panel-v4 --symbol AAPL  # lock before observation
 uv run tajator forward-validate --name aapl-rejection-v1 --symbol AAPL \
     --date 2026-07-13  # capture a completed session before its options expire
 uv run tajator forward-latest --name msft-panel-v2 --symbol MSFT  # preferred daily capture
@@ -288,6 +289,14 @@ predeclared deterministic policy and collect at least 50 closed trades across
 at least three active months before the ordinary audit gates can confirm an
 edge. Shadow mode is intentionally long-running; stop it with Ctrl-C after the
 session. No order was placed by building or testing this feature.
+
+Run `forward-init` before the first session of a new prospective cohort. It is
+a local, no-TWS operation that freezes the symbol, strategy configuration,
+execution model, capture protocol, and executable-source fingerprint. A
+pre-session manifest is conservatively eligible starting the next calendar
+day, so a cohort initialized after observing any part of today's session cannot
+retroactively ingest today. Repeating the same initialization is idempotent;
+reusing its name after any fingerprint change is refused.
 
 Forward capture also records a predeclared option panel for every base trade:
 one listed strike ITM at the base expiration, one strike OTM, and the base
