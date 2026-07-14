@@ -64,3 +64,25 @@ def test_check_ib_has_dedicated_default_client_id(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tajator", "check-ib"])
     cli.main()
     assert seen == [118]
+
+
+def test_strategy_compare_forwards_locked_report_paths(monkeypatch, tmp_path):
+    seen = []
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    monkeypatch.setattr(cli, "cmd_strategy_compare", lambda args: seen.append(args))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tajator", "strategy-compare", str(baseline), str(candidate),
+            "--min-trades", "250", "--only-change", "max_entry_to_stop_cents",
+            "--output", str(tmp_path / "comparison.json"),
+        ],
+    )
+    cli.main()
+    assert seen[0].baseline == baseline
+    assert seen[0].candidate == candidate
+    assert seen[0].min_trades == 250
+    assert seen[0].only_change == ["max_entry_to_stop_cents"]
+    assert seen[0].output == tmp_path / "comparison.json"

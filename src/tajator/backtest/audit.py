@@ -153,6 +153,189 @@ class PairedPanelStats:
     verdict: str
 
 
+def _daily_metric(trades: list[dict], metric: str) -> dict[str, float]:
+    daily: dict[str, float] = defaultdict(float)
+    for trade in trades:
+        if trade.get("closed", True) and trade.get(metric) is not None:
+            daily[str(trade["day"])] += float(trade[metric])
+    return dict(daily)
+
+
+def compare_strategy_reports(
+    baseline: dict,
+    candidate: dict,
+    *,
+    min_trades: int = 50,
+    min_positive_month_ratio: float = 0.6,
+    expected_config_changes: tuple[str, ...] = (),
+) -> dict:
+    """Paired day-clustered audit for two causal strategy replays.
+
+    Trades cannot be paired directly because vetoing one setup may expose a
+    later setup. Aggregating each replay by trading day preserves that causal
+    difference; a day with a trade in only one report is paired with zero in
+    the other report.
+    """
+    if min_trades <= 0:
+        raise ValueError("min_trades must be positive")
+    if not 0 <= min_positive_month_ratio <= 1:
+        raise ValueError("min_positive_month_ratio must be between zero and one")
+
+    base_meta = baseline.get("metadata") or {}
+    candidate_meta = candidate.get("metadata") or {}
+    base_mode = base_meta.get("research_mode", "historical_options")
+    candidate_mode = candidate_meta.get("research_mode", "historical_options")
+    if base_mode != candidate_mode:
+        raise ValueError("baseline and candidate research modes differ")
+    metric = "underlying_points" if base_mode == "underlying_only" else "pnl"
+
+    same_scope = all(
+        baseline.get(name) == candidate.get(name)
+        for name in ("symbol", "start", "end")
+    )
+    if not same_scope:
+        raise ValueError("baseline and candidate symbol/date scopes differ")
+
+    base_coverage = base_meta.get("data_coverage") or {}
+    candidate_coverage = candidate_meta.get("data_coverage") or {}
+    coverage_fields = ("requested_weekdays", "days_with_underlying_bars")
+    coverage_match = all(
+        int(base_coverage.get(name) or 0) == int(candidate_coverage.get(name) or 0)
+        for name in coverage_fields
+    )
+    requested = int(candidate_coverage.get("requested_weekdays") or 0)
+    covered = int(candidate_coverage.get("days_with_underlying_bars") or 0)
+    coverage_ratio = covered / requested if requested else 0.0
+    base_config = base_meta.get("strategy_config") or {}
+    candidate_config = candidate_meta.get("strategy_config") or {}
+    strategy_config_changes = {
+        name: {"baseline": base_config.get(name), "candidate": candidate_config.get(name)}
+        for name in sorted(set(base_config) | set(candidate_config))
+        if base_config.get(name) != candidate_config.get(name)
+    }
+    same_code_revision = base_meta.get("code_revision") == candidate_meta.get("code_revision")
+    same_execution_model = base_meta.get("execution_model") == candidate_meta.get(
+        "execution_model"
+    )
+
+    baseline_stats = _sample_stats(baseline.get("trades") or [], metric)
+    candidate_stats = _sample_stats(candidate.get("trades") or [], metric)
+    base_daily = _daily_metric(baseline.get("trades") or [], metric)
+    candidate_daily = _daily_metric(candidate.get("trades") or [], metric)
+    paired_days = sorted(set(base_daily) | set(candidate_daily))
+    deltas = [candidate_daily.get(day, 0.0) - base_daily.get(day, 0.0) for day in paired_days]
+    count = len(deltas)
+    mean = sum(deltas) / count if count else 0.0
+    variance = (
+        sum((value - mean) ** 2 for value in deltas) / (count - 1)
+        if count > 1 else 0.0
+    )
+    margin = 1.96 * math.sqrt(variance) / math.sqrt(count) if count > 1 else 0.0
+
+    half_year_totals: dict[str, float] = defaultdict(float)
+    for day, value in candidate_daily.items():
+        month = int(day[5:7])
+        half_year_totals[f"{day[:4]}-H{1 if month <= 6 else 2}"] += value
+    start_text, end_text = str(candidate.get("start")), str(candidate.get("end"))
+    if len(start_text) >= 7 and len(end_text) >= 7:
+        start_year, start_month = int(start_text[:4]), int(start_text[5:7])
+        end_year, end_month = int(end_text[:4]), int(end_text[5:7])
+        for year in range(start_year, end_year + 1):
+            for half, first_month, last_month in ((1, 1, 6), (2, 7, 12)):
+                if (year, last_month) < (start_year, start_month):
+                    continue
+                if (year, first_month) > (end_year, end_month):
+                    continue
+                half_year_totals.setdefault(f"{year}-H{half}", 0.0)
+    half_year_totals = {
+        period: round(value, 4) for period, value in sorted(half_year_totals.items())
+    }
+
+    gates = {
+        "same_scope": same_scope,
+        "same_code_revision": same_code_revision,
+        "same_execution_model": same_execution_model,
+        "matching_coverage": coverage_match,
+        "coverage_at_least_90pct": coverage_ratio >= 0.9,
+        "minimum_candidate_trades": candidate_stats.trades >= min_trades,
+        "positive_candidate_expectancy": candidate_stats.expectancy > 0,
+        "candidate_ci95_above_zero": candidate_stats.ci95_low > 0,
+        "candidate_expectancy_above_baseline": (
+            candidate_stats.expectancy > baseline_stats.expectancy
+        ),
+        "paired_daily_ci95_above_zero": count > 1 and mean - margin > 0,
+        "positive_month_stability": (
+            candidate_stats.active_months >= 3
+            and candidate_stats.positive_month_ratio >= min_positive_month_ratio
+        ),
+        "positive_each_half_year": bool(half_year_totals) and all(
+            value > 0 for value in half_year_totals.values()
+        ),
+        "drawdown_not_worse": candidate_stats.max_drawdown <= baseline_stats.max_drawdown,
+    }
+    if expected_config_changes:
+        gates["only_expected_config_changes"] = (
+            set(strategy_config_changes) == set(expected_config_changes)
+        )
+    return {
+        "symbol": baseline.get("symbol", ""),
+        "start": baseline.get("start"),
+        "end": baseline.get("end"),
+        "mode": base_mode,
+        "metric": metric,
+        "baseline": asdict(baseline_stats),
+        "candidate": asdict(candidate_stats),
+        "paired_daily": {
+            "days": count,
+            "total_improvement": round(sum(deltas), 4),
+            "mean_improvement": round(mean, 4),
+            "ci95_low": round(mean - margin, 4),
+            "ci95_high": round(mean + margin, 4),
+            "candidate_better_days": sum(value > 0 for value in deltas),
+        },
+        "coverage": {
+            "matching": coverage_match,
+            "requested_weekdays": requested,
+            "days_with_underlying_bars": covered,
+            "ratio": round(coverage_ratio, 4),
+        },
+        "strategy_config_changes": strategy_config_changes,
+        "candidate_half_year_totals": half_year_totals,
+        "gates": gates,
+        "verdict": "candidate_supported" if all(gates.values()) else "candidate_not_supported",
+    }
+
+
+def print_strategy_comparison(result: dict) -> None:
+    base, candidate, paired = result["baseline"], result["candidate"], result["paired_daily"]
+    unit = "pts" if result["metric"] == "underlying_points" else "$"
+    print(
+        f"\n--- paired strategy comparison: {result['symbol']} "
+        f"{result['start']} → {result['end']} ---"
+    )
+    print(f"verdict: {result['verdict']}")
+    print(
+        f"baseline:  {base['trades']} trades, {base['total']:+.2f}{unit}, "
+        f"expectancy {base['expectancy']:+.3f}{unit}"
+    )
+    print(
+        f"candidate: {candidate['trades']} trades, {candidate['total']:+.2f}{unit}, "
+        f"expectancy {candidate['expectancy']:+.3f}{unit} "
+        f"(95% CI {candidate['ci95_low']:+.3f}..{candidate['ci95_high']:+.3f})"
+    )
+    print(
+        f"paired active days: {paired['days']}, mean delta "
+        f"{paired['mean_improvement']:+.3f}{unit} "
+        f"(95% CI {paired['ci95_low']:+.3f}..{paired['ci95_high']:+.3f})"
+    )
+    for name, change in result["strategy_config_changes"].items():
+        print(f"  config {name}: {change['baseline']!r} → {change['candidate']!r}")
+    for period, total in result["candidate_half_year_totals"].items():
+        print(f"  {period}: {total:+.2f}{unit}")
+    for name, passed in result["gates"].items():
+        print(f"  {'PASS' if passed else 'FAIL'}  {name.replace('_', ' ')}")
+
+
 def _sample_stats(trades: list[dict], metric: str) -> SampleStats:
     observations = [
         (str(trade["day"]), float(trade[metric]))

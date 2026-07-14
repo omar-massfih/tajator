@@ -116,6 +116,20 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
+    strategy_compare = sub.add_parser(
+        "strategy-compare",
+        help="paired day-clustered comparison of baseline and candidate replays",
+    )
+    strategy_compare.add_argument("baseline", type=Path)
+    strategy_compare.add_argument("candidate", type=Path)
+    strategy_compare.add_argument("--min-trades", type=int, default=50)
+    strategy_compare.add_argument("--min-positive-month-ratio", type=float, default=0.6)
+    strategy_compare.add_argument(
+        "--only-change", action="append", default=[],
+        help="require this strategy setting to be the only change (repeatable)",
+    )
+    strategy_compare.add_argument("--output", type=Path, default=None)
+
     audit = sub.add_parser(
         "edge-audit",
         help="audit whether a backtest is stable and out-of-sample enough to support an edge",
@@ -240,6 +254,8 @@ def main() -> None:
     elif args.command == "backtest-compare":
         from .backtest.compare import print_comparison
         print_comparison(args.reports)
+    elif args.command == "strategy-compare":
+        cmd_strategy_compare(args)
     elif args.command == "edge-audit":
         cmd_edge_audit(args)
     elif args.command == "forward-validate":
@@ -757,6 +773,29 @@ def cmd_option_panel_compare(args) -> None:
     except ValueError as exc:
         sys.exit(f"option panel comparison failed: {exc}")
     print_option_panel(report, min_pairs=args.min_pairs)
+
+
+def cmd_strategy_compare(args) -> None:
+    from .backtest.audit import compare_strategy_reports, print_strategy_comparison
+
+    try:
+        baseline = json.loads(args.baseline.read_text())
+        candidate = json.loads(args.candidate.read_text())
+        result = compare_strategy_reports(
+            baseline,
+            candidate,
+            min_trades=args.min_trades,
+            min_positive_month_ratio=args.min_positive_month_ratio,
+            expected_config_changes=tuple(args.only_change),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"strategy comparison failed: {exc}")
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2))
+    print_strategy_comparison(result)
+    if args.output is not None:
+        print(f"paired comparison report: {args.output}")
 
 
 def cmd_execution_calibrate(args) -> None:
