@@ -77,6 +77,10 @@ def main() -> None:
         "--client-id", type=int, default=118,
         help="dedicated read-only diagnostic client ID (default: 118)",
     )
+    check_ib.add_argument(
+        "--entry-samples", type=int, choices=range(1, 6), default=1,
+        help="paired entry-data samples per symbol, 1-5 (recommended: 3)",
+    )
     sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
     test_order = sub.add_parser(
@@ -501,9 +505,107 @@ def _streaming_entry_market_diagnostic(broker, contract, timeout_s: float = 5.0)
             )
 
 
+def _run_entry_market_data_pair(
+    broker, settings, diagnostics, contract, symbol: str, sample_index: int,
+) -> None:
+    """Persist one no-order temporary-stream/production-snapshot pair."""
+    from .trade.execution import validate_option_liquidity
+
+    diagnostic_started_at = broker.now()
+    diagnostic_id = (
+        f"{symbol}:{diagnostic_started_at.isoformat()}:sample-{sample_index}"
+    )
+    entry_window = (9, 30) <= (
+        diagnostic_started_at.hour, diagnostic_started_at.minute,
+    ) <= (14, 0)
+    common = {
+        "symbol": symbol,
+        "diagnostic_id": diagnostic_id,
+        "sample_index": sample_index,
+        "regular_entry_window": entry_window,
+        "contract": contract,
+        "no_order_placed": True,
+    }
+    stream_started = time.monotonic()
+    try:
+        quote, underlying, elapsed = _streaming_entry_market_diagnostic(
+            broker, contract,
+        )
+        diagnostics.write(
+            "entry_market_data_diagnostic",
+            ts=broker.now(),
+            method="temporary_streams",
+            elapsed_seconds=round(elapsed, 4),
+            complete_bid_ask=quote.bid is not None and quote.ask is not None,
+            liquidity_reason=validate_option_liquidity(
+                quote, settings, now=broker.now(),
+            ),
+            option_quote=quote,
+            underlying_price=underlying,
+            **common,
+        )
+        print(
+            f"sample {sample_index} experimental streams ({elapsed:.2f}s): "
+            f"underlying {underlying}; {contract.local_name} "
+            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}"
+        )
+    except Exception as exc:  # noqa: BLE001 — production check must still run
+        elapsed = time.monotonic() - stream_started
+        diagnostics.write(
+            "entry_market_data_diagnostic",
+            ts=broker.now(),
+            method="temporary_streams",
+            elapsed_seconds=round(elapsed, 4),
+            complete_bid_ask=False,
+            error=str(exc),
+            **common,
+        )
+        print(f"sample {sample_index} experimental streams unavailable: {exc}")
+
+    started = time.monotonic()
+    try:
+        quote, underlying = broker.get_entry_market_snapshot(contract)
+    except Exception as exc:  # noqa: BLE001 — keep checking later samples
+        elapsed = time.monotonic() - started
+        diagnostics.write(
+            "entry_market_data_diagnostic",
+            ts=broker.now(),
+            method="production_snapshot",
+            elapsed_seconds=round(elapsed, 4),
+            complete_bid_ask=False,
+            error=str(exc),
+            **common,
+        )
+        print(
+            f"sample {sample_index} production snapshot failed "
+            f"after {elapsed:.2f}s: {exc}"
+        )
+    else:
+        elapsed = time.monotonic() - started
+        age = max(0.0, (broker.now() - quote.ts).total_seconds())
+        diagnostics.write(
+            "entry_market_data_diagnostic",
+            ts=broker.now(),
+            method="production_snapshot",
+            elapsed_seconds=round(elapsed, 4),
+            complete_bid_ask=quote.bid is not None and quote.ask is not None,
+            liquidity_reason=validate_option_liquidity(
+                quote, settings, now=broker.now(),
+            ),
+            option_quote=quote,
+            underlying_price=underlying,
+            **common,
+        )
+        print(
+            f"sample {sample_index} production snapshot ({elapsed:.2f}s): "
+            f"underlying {underlying}; {contract.local_name} "
+            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}; "
+            f"quote age {age:.2f}s"
+        )
+
+
 def cmd_check_ib(args) -> None:
     from .trade.contracts import select_contract
-    from .trade.execution import validate_option_liquidity
 
     settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
     settings, broker = _ib_broker(settings)
@@ -529,100 +631,12 @@ def cmd_check_ib(args) -> None:
             if bars:
                 contract = select_contract(chain, symbol, bars[-1].close, "call", broker.now())
                 if contract:
-                    diagnostic_started_at = broker.now()
-                    diagnostic_id = f"{symbol}:{diagnostic_started_at.isoformat()}"
-                    entry_window = (9, 30) <= (
-                        diagnostic_started_at.hour, diagnostic_started_at.minute,
-                    ) <= (14, 0)
-                    stream_started = time.monotonic()
-                    try:
-                        quote, underlying, elapsed = _streaming_entry_market_diagnostic(
-                            broker, contract,
+                    for sample_index in range(1, args.entry_samples + 1):
+                        _run_entry_market_data_pair(
+                            broker, settings, diagnostics, contract, symbol, sample_index,
                         )
-                        diagnostics.write(
-                            "entry_market_data_diagnostic",
-                            ts=broker.now(),
-                            symbol=symbol,
-                            diagnostic_id=diagnostic_id,
-                            regular_entry_window=entry_window,
-                            method="temporary_streams",
-                            contract=contract,
-                            elapsed_seconds=round(elapsed, 4),
-                            complete_bid_ask=quote.bid is not None and quote.ask is not None,
-                            liquidity_reason=validate_option_liquidity(
-                                quote, settings, now=broker.now(),
-                            ),
-                            option_quote=quote,
-                            underlying_price=underlying,
-                            no_order_placed=True,
-                        )
-                        print(
-                            f"experimental entry streams ({elapsed:.2f}s): "
-                            f"underlying {underlying}; {contract.local_name} "
-                            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}"
-                        )
-                    except Exception as exc:  # noqa: BLE001 — production check must still run
-                        elapsed = time.monotonic() - stream_started
-                        diagnostics.write(
-                            "entry_market_data_diagnostic",
-                            ts=broker.now(),
-                            symbol=symbol,
-                            diagnostic_id=diagnostic_id,
-                            regular_entry_window=entry_window,
-                            method="temporary_streams",
-                            contract=contract,
-                            elapsed_seconds=round(elapsed, 4),
-                            complete_bid_ask=False,
-                            error=str(exc),
-                            no_order_placed=True,
-                        )
-                        print(f"experimental entry streams unavailable: {exc}")
-
-                    started = time.monotonic()
-                    try:
-                        quote, underlying = broker.get_entry_market_snapshot(contract)
-                    except Exception as exc:  # noqa: BLE001 — keep checking the next symbol
-                        elapsed = time.monotonic() - started
-                        diagnostics.write(
-                            "entry_market_data_diagnostic",
-                            ts=broker.now(),
-                            symbol=symbol,
-                            diagnostic_id=diagnostic_id,
-                            regular_entry_window=entry_window,
-                            method="production_snapshot",
-                            contract=contract,
-                            elapsed_seconds=round(elapsed, 4),
-                            complete_bid_ask=False,
-                            error=str(exc),
-                            no_order_placed=True,
-                        )
-                        print(f"production entry snapshot failed after {elapsed:.2f}s: {exc}")
-                    else:
-                        elapsed = time.monotonic() - started
-                        age = max(0.0, (broker.now() - quote.ts).total_seconds())
-                        diagnostics.write(
-                            "entry_market_data_diagnostic",
-                            ts=broker.now(),
-                            symbol=symbol,
-                            diagnostic_id=diagnostic_id,
-                            regular_entry_window=entry_window,
-                            method="production_snapshot",
-                            contract=contract,
-                            elapsed_seconds=round(elapsed, 4),
-                            complete_bid_ask=quote.bid is not None and quote.ask is not None,
-                            liquidity_reason=validate_option_liquidity(
-                                quote, settings, now=broker.now(),
-                            ),
-                            option_quote=quote,
-                            underlying_price=underlying,
-                            no_order_placed=True,
-                        )
-                        print(
-                            f"production entry snapshot ({elapsed:.2f}s): "
-                            f"underlying {underlying}; {contract.local_name} "
-                            f"bid {quote.bid} / ask {quote.ask} / last {quote.last}; "
-                            f"quote age {age:.2f}s"
-                        )
+                        if sample_index < args.entry_samples:
+                            broker.ib.sleep(5.0)
         print("\ncheck-ib complete. No orders were placed.")
     finally:
         broker.disconnect()

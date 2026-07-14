@@ -8,7 +8,7 @@ import pytest
 from tajator import cli
 from tajator.broker.ib import IBBroker
 from tajator.config import Settings
-from tajator.models import SelectedContract
+from tajator.models import OptionQuote, SelectedContract
 
 
 def test_run_deterministic_flag_is_forwarded(monkeypatch):
@@ -67,10 +67,25 @@ def test_shadow_has_dedicated_default_client_id(monkeypatch):
 
 def test_check_ib_has_dedicated_default_client_id(monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, "cmd_check_ib", lambda args: seen.append(args.client_id))
+    monkeypatch.setattr(cli, "cmd_check_ib", lambda args: seen.append(args))
     monkeypatch.setattr(sys, "argv", ["tajator", "check-ib"])
     cli.main()
-    assert seen == [118]
+    assert seen[0].client_id == 118
+    assert seen[0].entry_samples == 1
+
+
+def test_check_ib_accepts_bounded_multi_sample_collection(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_check_ib", lambda args: seen.append(args))
+    monkeypatch.setattr(sys, "argv", ["tajator", "check-ib", "--entry-samples", "3"])
+    cli.main()
+    assert seen[0].entry_samples == 3
+
+
+def test_check_ib_refuses_more_than_five_entry_samples(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["tajator", "check-ib", "--entry-samples", "6"])
+    with pytest.raises(SystemExit):
+        cli.main()
 
 
 def test_strategy_compare_forwards_locked_report_paths(monkeypatch, tmp_path):
@@ -263,3 +278,43 @@ def test_streaming_entry_diagnostic_reports_cleanup_failure(monkeypatch, tmp_pat
 
     with pytest.raises(RuntimeError, match="cleanup failed.*option cancel rejected"):
         cli._streaming_entry_market_diagnostic(broker, contract)
+
+
+def test_entry_market_data_pair_persists_matching_no_order_records(monkeypatch):
+    now = datetime(2026, 7, 15, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260717", strike=315.0, right="C"
+    )
+    quote = OptionQuote(bid=1.98, ask=2.04, last=2.0, ts=now)
+    broker = SimpleNamespace(
+        now=lambda: now,
+        get_entry_market_snapshot=lambda selected: (quote, 314.70),
+    )
+    records = []
+    diagnostics = SimpleNamespace(
+        write=lambda event_type, **payload: records.append(
+            {"type": event_type, **payload}
+        )
+    )
+    monkeypatch.setattr(
+        cli,
+        "_streaming_entry_market_diagnostic",
+        lambda current_broker, selected: (quote, 314.70, 0.8),
+    )
+    times = iter([100.0, 200.0, 212.0])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    cli._run_entry_market_data_pair(
+        broker, Settings(_env_file=None), diagnostics, contract, "AAPL", 2,
+    )
+
+    assert [record["method"] for record in records] == [
+        "temporary_streams", "production_snapshot",
+    ]
+    assert records[0]["diagnostic_id"] == records[1]["diagnostic_id"]
+    assert records[0]["diagnostic_id"].endswith(":sample-2")
+    assert all(record["regular_entry_window"] is True for record in records)
+    assert all(record["no_order_placed"] is True for record in records)
+    assert all(record["liquidity_reason"] is None for record in records)
+    assert records[0]["elapsed_seconds"] == 0.8
+    assert records[1]["elapsed_seconds"] == 12.0
