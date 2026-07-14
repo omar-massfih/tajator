@@ -453,6 +453,7 @@ def _streaming_entry_market_diagnostic(broker, contract, timeout_s: float = 5.0)
     subscriptions = []
     started = time.monotonic()
     bid = ask = underlying = None
+    cleanup_errors = []
     try:
         option_ticker = broker.ib.reqMktData(opt, snapshot=False)
         subscriptions.append(opt)
@@ -480,13 +481,19 @@ def _streaming_entry_market_diagnostic(broker, contract, timeout_s: float = 5.0)
             try:
                 broker.ib.cancelMktData(subscribed)
             except Exception as exc:  # noqa: BLE001 — diagnostic cleanup is best effort
+                cleanup_errors.append(str(exc))
                 logging.getLogger(__name__).warning(
                     "could not cancel diagnostic market-data stream: %s", exc,
                 )
+        if cleanup_errors:
+            raise RuntimeError(
+                "temporary market-data cleanup failed: " + "; ".join(cleanup_errors)
+            )
 
 
 def cmd_check_ib(args) -> None:
     from .trade.contracts import select_contract
+    from .trade.execution import validate_option_liquidity
 
     settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
     settings, broker = _ib_broker(settings)
@@ -532,6 +539,9 @@ def cmd_check_ib(args) -> None:
                             contract=contract,
                             elapsed_seconds=round(elapsed, 4),
                             complete_bid_ask=quote.bid is not None and quote.ask is not None,
+                            liquidity_reason=validate_option_liquidity(
+                                quote, settings, now=broker.now(),
+                            ),
                             option_quote=quote,
                             underlying_price=underlying,
                             no_order_placed=True,
@@ -590,6 +600,9 @@ def cmd_check_ib(args) -> None:
                             contract=contract,
                             elapsed_seconds=round(elapsed, 4),
                             complete_bid_ask=quote.bid is not None and quote.ask is not None,
+                            liquidity_reason=validate_option_liquidity(
+                                quote, settings, now=broker.now(),
+                            ),
                             option_quote=quote,
                             underlying_price=underlying,
                             no_order_placed=True,

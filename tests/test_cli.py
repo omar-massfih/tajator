@@ -215,3 +215,32 @@ def test_streaming_entry_diagnostic_timeout_reports_partial_state_and_cancels(
         cli._streaming_entry_market_diagnostic(broker, contract)
 
     assert cancelled == [option, stock]
+
+
+def test_streaming_entry_diagnostic_reports_cleanup_failure(monkeypatch, tmp_path):
+    broker = IBBroker(Settings(_env_file=None, log_dir=tmp_path))
+    contract = SelectedContract(
+        symbol="AAPL", expiry="20260715", strike=315.0, right="P"
+    )
+    option, stock = object(), object()
+    option_ticker = SimpleNamespace(bid=1.98, ask=2.04, last=2.0)
+    stock_ticker = SimpleNamespace(marketPrice=lambda: 314.70)
+
+    def cancel(requested):
+        if requested is option:
+            raise RuntimeError("option cancel rejected")
+
+    broker.ib = SimpleNamespace(
+        reqMktData=lambda requested, snapshot: (
+            option_ticker if requested is option else stock_ticker
+        ),
+        waitOnUpdate=lambda timeout: None,
+        cancelMktData=cancel,
+    )
+    monkeypatch.setattr(broker, "_option", lambda selected: option)
+    monkeypatch.setattr(broker, "_underlying", lambda symbol: stock)
+    times = iter([100.0, 100.1])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    with pytest.raises(RuntimeError, match="cleanup failed.*option cancel rejected"):
+        cli._streaming_entry_market_diagnostic(broker, contract)
