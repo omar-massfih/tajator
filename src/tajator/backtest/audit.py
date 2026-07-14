@@ -220,6 +220,9 @@ def compare_strategy_reports(
 
     baseline_stats = _sample_stats(baseline.get("trades") or [], metric)
     candidate_stats = _sample_stats(candidate.get("trades") or [], metric)
+    trade_records_identical = (
+        (baseline.get("trades") or []) == (candidate.get("trades") or [])
+    )
     base_daily = _daily_metric(baseline.get("trades") or [], metric)
     candidate_daily = _daily_metric(candidate.get("trades") or [], metric)
     paired_days = sorted(set(base_daily) | set(candidate_daily))
@@ -272,6 +275,7 @@ def compare_strategy_reports(
             value > 0 for value in half_year_totals.values()
         ),
         "drawdown_not_worse": candidate_stats.max_drawdown <= baseline_stats.max_drawdown,
+        "changes_trade_records": not trade_records_identical,
     }
     if expected_config_changes:
         gates["only_expected_config_changes"] = (
@@ -300,6 +304,7 @@ def compare_strategy_reports(
             "ratio": round(coverage_ratio, 4),
         },
         "strategy_config_changes": strategy_config_changes,
+        "trade_records_identical": trade_records_identical,
         "candidate_half_year_totals": half_year_totals,
         "gates": gates,
         "verdict": "candidate_supported" if all(gates.values()) else "candidate_not_supported",
@@ -328,6 +333,11 @@ def print_strategy_comparison(result: dict) -> None:
         f"{paired['mean_improvement']:+.3f}{unit} "
         f"(95% CI {paired['ci95_low']:+.3f}..{paired['ci95_high']:+.3f})"
     )
+    identity = (
+        "IDENTICAL (candidate is behaviorally inert)"
+        if result["trade_records_identical"] else "different"
+    )
+    print(f"trade records: {identity}")
     for name, change in result["strategy_config_changes"].items():
         print(f"  config {name}: {change['baseline']!r} → {change['candidate']!r}")
     for period, total in result["candidate_half_year_totals"].items():

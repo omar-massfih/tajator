@@ -124,6 +124,47 @@ def test_paired_strategy_comparison_uses_daily_causal_deltas():
     assert result["gates"]["positive_each_half_year"] is False
     assert result["gates"]["same_code_revision"] is True
     assert result["gates"]["only_expected_config_changes"] is True
+    assert result["trade_records_identical"] is False
+    assert result["gates"]["changes_trade_records"] is True
+
+
+def test_paired_strategy_comparison_rejects_behaviorally_inert_candidate():
+    report = {
+        "symbol": "AAPL",
+        "start": "2025-07-01",
+        "end": "2026-06-30",
+        "trades": [
+            {"day": "2025-07-01", "underlying_points": 1.0, "closed": True},
+        ],
+        "metadata": {
+            "research_mode": "underlying_only",
+            "code_revision": "same-revision",
+            "execution_model": {"price_source": "next minute"},
+            "strategy_config": {"multi_timeframe_context": False},
+            "data_coverage": {
+                "requested_weekdays": 1,
+                "days_with_underlying_bars": 1,
+            },
+        },
+    }
+    candidate = {
+        **report,
+        "metadata": {
+            **report["metadata"],
+            "strategy_config": {"multi_timeframe_context": True},
+        },
+    }
+
+    result = compare_strategy_reports(
+        report,
+        candidate,
+        min_trades=1,
+        expected_config_changes=("multi_timeframe_context",),
+    )
+
+    assert result["trade_records_identical"] is True
+    assert result["gates"]["changes_trade_records"] is False
+    assert result["verdict"] == "candidate_not_supported"
 
 
 def test_paired_strategy_comparison_refuses_scope_mismatch():
