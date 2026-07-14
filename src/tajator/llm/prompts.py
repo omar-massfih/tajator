@@ -34,7 +34,17 @@ THE STRATEGY
   setup than a slow drift. Exact penny touches are not required.
 - Price action confirms: wicks/rejection at the level support the trade; a clean
   slice through the level argues against it.
+- PRICE ACTION facts are computed mechanically for each candidate. Interpret wick,
+  reclaim, repeated-rejection, and higher-low/lower-high labels only in relation to
+  that candidate's level. A true wick excludes the candle body; close-off-extreme
+  is a separate measure that can include the body. These facts can strengthen or
+  weaken a detected setup, but they never authorize a setup that was not detected.
+- A completed rejection followed by price moving away is a missed entry, not extra
+  confirmation. Use the raw approach direction and distance to avoid chasing it.
 - VWAP is context and an exit reference, never an entry signal by itself.
+- Daily and 5-minute facts are context and candidate-ranking evidence only. Daily
+  reference levels cannot authorize a trade; entries must still anchor to a
+  DETECTED SETUP CANDIDATE. A candle labeled FORMING is incomplete and may change.
 
 RISK — non-negotiable
 - Every entry needs a plan BEFORE entering: the level (level_price) and a mental

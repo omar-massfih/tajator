@@ -27,10 +27,12 @@ class StubBroker(Broker):
         prev_day_high: float | None = None,
         prev_day_low: float | None = None,
         chain: ChainParams | None = None,
+        daily_bars: list[Bar] | None = None,
     ):
         self.bars = sorted(bars, key=lambda b: b.ts)
         self.prev_day_high = prev_day_high
         self.prev_day_low = prev_day_low
+        self.daily_bars = sorted(daily_bars or [], key=lambda b: b.ts)
         self._chain = chain or self._default_chain()
         self.cursor = 0  # index of the latest visible bar
         self.fills: list[tuple[str, SelectedContract, Fill]] = []
@@ -98,6 +100,11 @@ class StubBroker(Broker):
 
     def get_prev_day_range(self, symbol: str) -> tuple[float | None, float | None]:
         return self.prev_day_high, self.prev_day_low
+
+    def get_daily_bars(self, symbol: str, lookback_days: int = 90) -> list[Bar]:
+        today = self.now().astimezone(ET).date()
+        completed = [bar for bar in self.daily_bars if bar.ts.date() < today]
+        return completed[-lookback_days:]
 
     def get_option_chain(self, symbol: str) -> ChainParams:
         return self._chain

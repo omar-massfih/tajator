@@ -4,22 +4,93 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime
 from typing import Literal
 
 from ..broker.base import Broker
 from ..config import Settings
-from ..models import Decision, Direction, ExecutedAction, OpenPosition, SetupCandidate, Snapshot
+from ..models import (
+    Decision,
+    Direction,
+    ExecutedAction,
+    OpenPosition,
+    OptionQuote,
+    SetupCandidate,
+    Snapshot,
+)
 from .contracts import select_contract
 from .position import active_stop_price, build_plan, current_piece_qty, update_extreme
 
 log = logging.getLogger(__name__)
 
 
-def size_entry(premium: float, settings: Settings) -> int:
+def size_entry(premium: float, settings: Settings, *, reserve_pct: float = 0.0) -> int:
     if premium <= 0:
         return 0
-    affordable = math.floor(settings.max_premium_usd / (premium * 100))
+    reserved = premium * (1 + reserve_pct)
+    affordable = math.floor(settings.max_premium_usd / (reserved * 100))
     return min(settings.max_contracts, affordable)
+
+
+def validate_entry_preflight(
+    quote: OptionQuote,
+    underlying: float | None,
+    snapshot: Snapshot,
+    candidate: SetupCandidate,
+    stop_price: float,
+    settings: Settings,
+) -> str | None:
+    """Return a skip reason when liquidity or the original signal degraded."""
+    quote_reason = validate_option_liquidity(quote, settings)
+    if quote_reason:
+        return quote_reason
+    if underlying is None or underlying <= 0:
+        return "no fresh underlying price for entry preflight"
+
+    level = candidate.level.price
+    approach = settings.approach_band_pct * level
+    overshoot = settings.overshoot_band_pct * level
+    drift_limit = max(
+        settings.max_entry_drift_min_cents / 100,
+        (snapshot.atr or 0.0) * settings.max_entry_drift_atr,
+    )
+    if candidate.direction == "call":
+        if underlying <= stop_price:
+            return f"underlying {underlying:.2f} already crossed call stop {stop_price:.2f}"
+        if underlying - snapshot.price > drift_limit:
+            return f"call signal moved away by {underlying - snapshot.price:.2f}"
+        if not level - overshoot <= underlying <= level + approach:
+            return f"underlying {underlying:.2f} left support approach zone"
+    else:
+        if underlying >= stop_price:
+            return f"underlying {underlying:.2f} already crossed put stop {stop_price:.2f}"
+        if snapshot.price - underlying > drift_limit:
+            return f"put signal moved away by {snapshot.price - underlying:.2f}"
+        if not level - approach <= underlying <= level + overshoot:
+            return f"underlying {underlying:.2f} left resistance approach zone"
+    return None
+
+
+def validate_option_liquidity(
+    quote: OptionQuote, settings: Settings, now: datetime | None = None
+) -> str | None:
+    """Validate the quote facts shared by production entries and test-order."""
+    if not quote.valid:
+        return "entry quote has no valid positive bid/ask"
+    if quote.delayed:
+        return "entry option quote is delayed"
+    now = now or datetime.now(quote.ts.tzinfo)
+    age = max(0.0, (now - quote.ts).total_seconds())
+    if age > settings.max_option_quote_age_s:
+        return f"entry quote is stale ({age:.1f}s old)"
+    midpoint, spread = quote.midpoint, quote.spread
+    allowed_spread = min(
+        settings.max_option_spread_cents / 100,
+        settings.max_option_spread_pct * midpoint,
+    )
+    if spread > allowed_spread:
+        return f"option spread {spread:.2f} exceeds {allowed_spread:.2f} maximum"
+    return None
 
 
 def stop_order_ref(settings: Settings, symbol: str) -> str:
@@ -41,17 +112,72 @@ def execute_entry(
     if contract is None:
         return None, None, "no usable contract in option chain"
 
-    premium = broker.get_option_premium(contract)
+    preflight_quote = None
+    preflight_underlying = None
+    if broker.uses_live_execution_guards:
+        try:
+            preflight_quote = broker.get_option_quote(contract)
+        except Exception as exc:  # fail closed: an entry is optional
+            reason = f"entry option quote request failed: {exc}"
+            broker.record_execution_preflight(
+                ts=broker.now(), symbol=snapshot.symbol, contract=contract,
+                signal_ts=snapshot.ts, signal_equity_price=snapshot.price,
+                underlying_price=None, option_quote=None, accepted=False, reason=reason,
+            )
+            return None, None, reason
+        try:
+            preflight_underlying = broker.get_underlying_price(snapshot.symbol)
+        except Exception as exc:  # exits intentionally do not use this gate
+            reason = f"entry underlying quote request failed: {exc}"
+            broker.record_execution_preflight(
+                ts=preflight_quote.ts, symbol=snapshot.symbol, contract=contract,
+                signal_ts=snapshot.ts, signal_equity_price=snapshot.price,
+                underlying_price=None, option_quote=preflight_quote,
+                accepted=False, reason=reason,
+            )
+            return None, None, reason
+        reason = validate_entry_preflight(
+            preflight_quote, preflight_underlying, snapshot, candidate,
+            decision.stop_price, settings,
+        ) if candidate is not None and decision.stop_price is not None else "entry candidate/stop missing"
+        broker.record_execution_preflight(
+            ts=preflight_quote.ts,
+            symbol=snapshot.symbol,
+            contract=contract,
+            signal_ts=snapshot.ts,
+            signal_equity_price=snapshot.price,
+            underlying_price=preflight_underlying,
+            option_quote=preflight_quote,
+            accepted=reason is None,
+            reason=reason or "accepted",
+        )
+        if reason:
+            return None, None, reason
+        premium = preflight_quote.ask
+        reserve_pct = settings.entry_budget_reserve_pct
+    else:
+        premium = broker.get_option_premium(contract)
+        reserve_pct = 0.0
     if premium is None or premium <= 0:
         return None, None, f"no premium quote for {contract.local_name}"
-    qty = size_entry(premium, settings)
+    qty = size_entry(premium, settings, reserve_pct=reserve_pct)
     if qty == 0:
+        reserved_cost = premium * (1 + reserve_pct) * 100
         return None, None, (
-            f"one {contract.local_name} costs ${premium * 100:.0f} — over MAX_PREMIUM_USD budget"
+            f"one {contract.local_name} reserves ${reserved_cost:.0f} — over MAX_PREMIUM_USD budget"
         )
 
     fill = broker.buy_option(contract, qty)
-    fill.equity_price = snapshot.price
+    quality = fill.execution_quality
+    if quality is not None:
+        quality.signal_ts = snapshot.ts
+        quality.preflight_ts = preflight_quote.ts if preflight_quote is not None else None
+        quality.underlying_signal = snapshot.price
+    entry_equity_price = (
+        quality.underlying_fill if quality is not None and quality.underlying_fill is not None
+        else preflight_underlying if preflight_underlying is not None else snapshot.price
+    )
+    fill.equity_price = entry_equity_price
     fill.stop_price = decision.stop_price
     fill.regime = snapshot.regime
     fill.level_quality_score = candidate.quality_score if candidate is not None else 0.0
@@ -61,7 +187,7 @@ def execute_entry(
         direction=direction,
         level_price=decision.level_price,
         stop_price=decision.stop_price,
-        entry_equity_price=snapshot.price,
+        entry_equity_price=entry_equity_price,
         entry_premium=fill.premium,
         qty=fill.qty,
         hod_at_entry=snapshot.hod,
@@ -70,11 +196,11 @@ def execute_entry(
     position = OpenPosition(
         contract=contract, plan=plan, qty_remaining=fill.qty, opened_at=fill.ts
     )
-    update_extreme(position, snapshot.price)
+    update_extreme(position, entry_equity_price)
     restore_protective_stop(broker, settings, position, snapshot.symbol)
     action = ExecutedAction(
-        kind="entry", qty=fill.qty, premium=fill.premium, equity_price=snapshot.price,
-        ts=fill.ts, reason=decision.reasoning,
+        kind="entry", qty=fill.qty, premium=fill.premium, equity_price=entry_equity_price,
+        ts=fill.ts, reason=decision.reasoning, execution_quality=quality,
     )
     return position, action, None
 
@@ -145,7 +271,12 @@ def execute_scale_out(
     qty = min(current_piece_qty(position), position.qty_remaining)
     if qty > 0:
         fill = broker.sell_option(position.contract, qty)
-        fill.equity_price = snapshot.price
+        quality = fill.execution_quality
+        equity_price = (
+            quality.underlying_fill if quality is not None and quality.underlying_fill is not None
+            else snapshot.price
+        )
+        fill.equity_price = equity_price
         fill.exit_reason = reason
         if fill.qty == qty:
             position.pieces_sold += 1  # a partially sold piece is retried on the next signal
@@ -160,7 +291,8 @@ def execute_scale_out(
         actions.append(
             ExecutedAction(
                 kind="scale_out", qty=fill.qty, premium=fill.premium,
-                equity_price=snapshot.price, ts=fill.ts, reason=reason,
+                equity_price=equity_price, ts=fill.ts, reason=reason,
+                execution_quality=quality,
             )
         )
     restore_protective_stop(broker, settings, position, snapshot.symbol)
@@ -182,13 +314,18 @@ def execute_exit(
     qty = position.qty_remaining
     if qty > 0:
         fill = broker.sell_option(position.contract, qty)
-        fill.equity_price = snapshot.price
+        quality = fill.execution_quality
+        equity_price = (
+            quality.underlying_fill if quality is not None and quality.underlying_fill is not None
+            else snapshot.price
+        )
+        fill.equity_price = equity_price
         fill.exit_reason = reason
         position.qty_remaining = qty - fill.qty  # nonzero after a partial exit
         actions.append(
             ExecutedAction(
-                kind=kind, qty=fill.qty, premium=fill.premium, equity_price=snapshot.price,
-                ts=fill.ts, reason=reason,
+                kind=kind, qty=fill.qty, premium=fill.premium, equity_price=equity_price,
+                ts=fill.ts, reason=reason, execution_quality=quality,
             )
         )
     # a partial exit leaves contracts that must stay stop-protected

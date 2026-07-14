@@ -62,7 +62,6 @@ def test_fast_squeeze_without_rejection_wick_is_blocked():
     fired = detect_candidates(bars, [RESISTANCE], snap, rejection_wick_frac=0.0)
     assert any(c.direction == "put" for c in fired)
 
-
 def test_far_from_any_level_no_candidates():
     cands = candidates_for([500.4, 500.5, 500.6, 500.5, 500.5])
     assert cands == []

@@ -66,6 +66,37 @@ def format_snapshot(
     for b in bars[-RECENT_BARS:]:
         lines.append(f"  {b.ts:%H:%M}  {b.open:.2f} {b.high:.2f} {b.low:.2f} {b.close:.2f}")
 
+    multi = snapshot.multi_timeframe
+    if multi is not None and multi.enabled:
+        daily = multi.daily
+        five = multi.five_minute
+        lines += [
+            "",
+            "HIGHER TIMEFRAMES (context/ranking only; never independent trade authorization):",
+            f"  daily bias {daily.bias} | EMA20 {fmt(daily.ema20)} | EMA50 {fmt(daily.ema50)} "
+            f"| EMA20 slope(5) {fmt(daily.ema20_slope_5)} | ATR14 {fmt(daily.atr14)}",
+        ]
+        if daily.reference_levels:
+            refs = ", ".join(
+                f"{level.price:.2f} ({level.label})" for level in daily.reference_levels
+            )
+            lines.append(f"  daily reference-only levels: {refs}")
+        lines.append(
+            f"  5m trend {five.trend} | EMA9 {fmt(five.ema9)} | "
+            f"EMA20 {fmt(five.ema20)} | ATR14 {fmt(five.atr14)}"
+        )
+        lines.append("  completed 5m candles (open/high/low/close):")
+        for bar in five.completed_bars:
+            lines.append(
+                f"    {bar.ts:%H:%M}  {bar.open:.2f} {bar.high:.2f} {bar.low:.2f} {bar.close:.2f}"
+            )
+        if five.forming_bar is not None:
+            bar = five.forming_bar
+            lines.append(
+                f"  FORMING 5m candle {bar.ts:%H:%M}: "
+                f"{bar.open:.2f} {bar.high:.2f} {bar.low:.2f} {bar.close:.2f}"
+            )
+
     lines += ["", "levels:"]
     for l in levels:
         lines.append(f"  {l.price:.2f}  {l.kind:<10} ({l.label})")
@@ -73,9 +104,33 @@ def format_snapshot(
     if candidates:
         lines += ["", "DETECTED SETUP CANDIDATES (only these are tradeable):"]
         for c in candidates:
+            pa = c.price_action
+            labels = ", ".join(pa.reaction_labels) if pa.reaction_labels else "none"
+            range_atr = f"{pa.range_atr:.2f}" if pa.range_atr is not None else "n/a"
+            rel_volume = f"{pa.relative_volume:.2f}" if pa.relative_volume is not None else "n/a"
             lines.append(
                 f"  {c.direction.upper()} — {c.note}, distance {c.distance:+.2f}, "
-                f"3-bar move {c.speed:+.2f}"
+                f"3-bar move {c.speed:+.2f}, quality {c.quality_score:.2f}, "
+                f"HTF {c.higher_timeframe_score.total:+.2f}, rank {c.ranking_score:.2f}"
+            )
+            htf = c.higher_timeframe_score
+            lines.append(
+                "    HTF score: "
+                f"daily-bias {htf.daily_bias:+.2f}, confluence {htf.daily_confluence:+.2f}, "
+                f"5m-trend {htf.five_minute_trend:+.2f}, reaction {htf.five_minute_reaction:+.2f}"
+            )
+            lines.append(
+                "    price action: "
+                f"body {pa.body_fraction:.2f}, upper wick {pa.upper_wick_fraction:.2f}, "
+                f"lower wick {pa.lower_wick_fraction:.2f}, close location {pa.close_location:.2f}, "
+                f"close-off-extreme {pa.close_rejection_fraction:.2f}, "
+                f"range/ATR {range_atr}, relative volume {rel_volume}"
+            )
+            lines.append(
+                "    level reaction: "
+                f"touched={pa.touched}, reclaimed={pa.reclaimed}, "
+                f"break-and-reclaim={pa.break_and_reclaim}, penetration={pa.penetration:.2f}, "
+                f"rejections={pa.rejection_count}, clean-slice={pa.clean_slice}; labels: {labels}"
             )
     else:
         lines += ["", "no setup candidates detected this tick"]
@@ -130,6 +185,17 @@ def format_prep_snapshot(symbol: str, snapshot: Snapshot, levels: list[Level]) -
     for l in levels:
         distance = l.price - snapshot.price
         lines.append(f"  {l.price:.2f}  {l.kind:<10} ({l.label})  distance {distance:+.2f}")
+    multi = snapshot.multi_timeframe
+    if multi is not None and multi.enabled:
+        daily = multi.daily
+        lines += [
+            "",
+            f"daily context: bias {daily.bias}, EMA20 {daily.ema20}, "
+            f"EMA50 {daily.ema50}, ATR14 {daily.atr14}",
+            "daily reference-only levels: " + ", ".join(
+                f"{level.price:.2f} ({level.label})" for level in daily.reference_levels
+            ),
+        ]
     return "\n".join(lines)
 
 

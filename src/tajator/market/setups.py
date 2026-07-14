@@ -18,8 +18,15 @@ show rejection at the level (a wick back in our direction) before it counts.
 
 from __future__ import annotations
 
-from ..models import Bar, Level, SetupCandidate, Snapshot
+from ..models import Bar, Level, PriceActionFeatures, SetupCandidate, Snapshot
 from .indicators import bars_to_df, session_df
+from .price_action import (
+    LONG_WICK_MIN_FRAC,
+    REACTION_LOOKBACK_BARS,
+    analyze_level_reaction,
+    close_off_extreme_fraction,
+    touch_rejected,
+)
 
 APPROACH_BAND = 0.003  # price within 0.3% of the level
 OVERSHOOT_BAND = 0.001  # slight poke through the level still counts
@@ -72,6 +79,8 @@ def detect_candidates(
     min_speed_pct: float = MIN_SPEED_PCT,
     fast_approach_mult: float = FAST_APPROACH_SPEED_MULT,
     rejection_wick_frac: float = REJECTION_WICK_MIN_FRAC,
+    reaction_lookback: int = REACTION_LOOKBACK_BARS,
+    long_wick_min_frac: float = LONG_WICK_MIN_FRAC,
     trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS,
     entry_confirmation: str = ENTRY_CONFIRMATION,
 ) -> list[SetupCandidate]:
@@ -105,12 +114,21 @@ def detect_candidates(
         if level.kind == "support":
             # Call setup: price falling into support from above (or a slight poke below).
             if -overshoot <= diff <= band and net_move <= -min_speed:
-                if entry_confirmation == "touch_rejection" and not _touch_rejected(
+                if entry_confirmation == "touch_rejection" and not touch_rejected(
                     bars[-1], level.price, "call", rejection_wick_frac
                 ):
                     continue
-                if fast is not None and -net_move >= fast and not _shows_rejection(bars[-1], "call", rejection_wick_frac):
+                if (
+                    fast is not None
+                    and -net_move >= fast
+                    and close_off_extreme_fraction(bars[-1], "call") < rejection_wick_frac
+                ):
                     continue  # fast flush, entry bar closed on its low — no proof the level held
+                price_action = analyze_level_reaction(
+                    bars, level.price, "call", current_atr=snapshot.atr,
+                    lookback=reaction_lookback, long_wick_min_frac=long_wick_min_frac,
+                    approach_band=approach_band, overshoot_band=overshoot_band,
+                )
                 candidates.append(
                     SetupCandidate(
                         direction="call",
@@ -119,18 +137,31 @@ def detect_candidates(
                         speed=round(net_move, 2),
                         note=f"falling into {level.label} @ {level.price}",
                         regime=snapshot.regime,
-                        quality_score=_quality_score(level, bars[-1], "call", snapshot),
+                        quality_score=_quality_score(
+                            level, "call", snapshot, price_action,
+                            rejection_wick_frac,
+                        ),
+                        price_action=price_action,
                     )
                 )
         else:
             # Put setup: price rising into resistance from below (or a slight poke above).
             if -overshoot <= -diff <= band and net_move >= min_speed:
-                if entry_confirmation == "touch_rejection" and not _touch_rejected(
+                if entry_confirmation == "touch_rejection" and not touch_rejected(
                     bars[-1], level.price, "put", rejection_wick_frac
                 ):
                     continue
-                if fast is not None and net_move >= fast and not _shows_rejection(bars[-1], "put", rejection_wick_frac):
+                if (
+                    fast is not None
+                    and net_move >= fast
+                    and close_off_extreme_fraction(bars[-1], "put") < rejection_wick_frac
+                ):
                     continue  # fast squeeze, entry bar closed on its high — no proof the level held
+                price_action = analyze_level_reaction(
+                    bars, level.price, "put", current_atr=snapshot.atr,
+                    lookback=reaction_lookback, long_wick_min_frac=long_wick_min_frac,
+                    approach_band=approach_band, overshoot_band=overshoot_band,
+                )
                 candidates.append(
                     SetupCandidate(
                         direction="put",
@@ -139,7 +170,11 @@ def detect_candidates(
                         speed=round(net_move, 2),
                         note=f"rising into {level.label} @ {level.price}",
                         regime=snapshot.regime,
-                        quality_score=_quality_score(level, bars[-1], "put", snapshot),
+                        quality_score=_quality_score(
+                            level, "put", snapshot, price_action,
+                            rejection_wick_frac,
+                        ),
+                        price_action=price_action,
                     )
                 )
     # Closest level first — that's the trade the LLM should judge.
@@ -147,36 +182,36 @@ def detect_candidates(
     return candidates
 
 
-def _shows_rejection(bar: Bar, direction: str, min_frac: float) -> bool:
-    """Did the entry bar wick back off the level in our favor?
-
-    Call at support: price must have closed off the bar's low by at least
-    min_frac of the range (a lower wick — sellers rejected). Put at
-    resistance: closed off the high. A zero-range bar proves nothing."""
-    rng = bar.high - bar.low
-    if rng <= 0:
-        return False
-    wick = bar.close - bar.low if direction == "call" else bar.high - bar.close
-    return wick >= min_frac * rng
-
-
-def _touch_rejected(bar: Bar, level: float, direction: str, min_frac: float) -> bool:
-    """Require the level to trade and the bar to close back on the favorable side."""
-    touched = bar.low <= level if direction == "call" else bar.high >= level
-    reclaimed = bar.close > level if direction == "call" else bar.close < level
-    return touched and reclaimed and _shows_rejection(bar, direction, min_frac)
-
-
-def _quality_score(level: Level, bar: Bar, direction: str, snapshot: Snapshot) -> float:
+def _quality_score(
+    level: Level,
+    direction: str,
+    snapshot: Snapshot,
+    price_action: PriceActionFeatures,
+    rejection_min_frac: float,
+) -> float:
     """Transparent pre-trade score; recorded before any score filter is applied."""
     source = {
         "prev_day_high": 3.0, "prev_day_low": 3.0,
         "premarket_high": 2.0, "premarket_low": 2.0,
         "double_top": 2.5, "double_bottom": 2.5,
     }.get(level.label, 1.0)
-    rejection = 1.0 if _touch_rejected(bar, level.price, direction, 0.25) else 0.0
+    # Price-action evidence is capped at 2 points so overlapping labels on one
+    # candle cannot overwhelm the strength of the underlying level.
+    reaction = 0.0
+    if price_action.reclaimed and price_action.close_rejection_fraction >= rejection_min_frac:
+        reaction += 1.0
+    wick_label = "long_lower_wick" if direction == "call" else "long_upper_wick"
+    if wick_label in price_action.reaction_labels:
+        reaction += 0.5
+    if price_action.rejection_count >= 2 or any(
+        label in price_action.reaction_labels for label in ("higher_low", "lower_high")
+    ):
+        reaction += 0.5
+    if price_action.clean_slice:
+        reaction -= 0.5
+    reaction = max(-0.5, min(2.0, reaction))
     vwap_context = 0.0
     if snapshot.vwap is not None:
         favorable = snapshot.price < snapshot.vwap if direction == "call" else snapshot.price > snapshot.vwap
         vwap_context = 0.5 if favorable else 0.0
-    return round(source + rejection + vwap_context, 2)
+    return round(source + reaction + vwap_context, 2)

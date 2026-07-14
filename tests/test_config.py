@@ -62,6 +62,7 @@ def test_level_quality_defaults_match_the_algorithm_constants():
 
 
 def test_setup_and_stop_defaults_match_the_algorithm_constants():
+    from tajator.market.price_action import LONG_WICK_MIN_FRAC, REACTION_LOOKBACK_BARS
     from tajator.market.setups import (
         APPROACH_BAND,
         MIN_SPEED_PCT,
@@ -75,8 +76,23 @@ def test_setup_and_stop_defaults_match_the_algorithm_constants():
     assert settings.overshoot_band_pct == OVERSHOOT_BAND
     assert settings.speed_window_bars == SPEED_WINDOW
     assert settings.min_speed_pct == MIN_SPEED_PCT
+    assert settings.reaction_lookback_bars == REACTION_LOOKBACK_BARS
+    assert settings.long_wick_min_frac == LONG_WICK_MIN_FRAC
     assert settings.stop_min_cents == STOP_MIN_CENTS
     assert settings.stop_max_cents == STOP_MAX_CENTS
+
+
+def test_guarded_execution_defaults():
+    settings = Settings(_env_file=None)
+    assert settings.max_option_spread_pct == 0.08
+    assert settings.max_option_spread_cents == 30
+    assert settings.entry_budget_reserve_pct == 0.05
+    assert settings.max_entry_drift_atr == 0.5
+    assert settings.max_execution_slippage_pct == 0.03
+    assert settings.max_execution_slippage_cents == 10
+    assert settings.max_acceptable_fill_latency_s == 10
+    assert settings.execution_diagnostic_max_age_days == 7
+    assert settings.execution_live_confirmed is False
 
 
 def test_level_quality_fields_parse_env_strings():
@@ -120,6 +136,8 @@ def test_symbol_strategy_override_resolves_without_mutating_global():
                 "max_entry_to_stop_cents": 90,
                 "no_new_entries_after": "14:00",
                 "blocked_direction_regimes": ["put:trend_up"],
+                "reaction_lookback_bars": 8,
+                "long_wick_min_frac": 0.4,
             }
         },
     )
@@ -128,6 +146,8 @@ def test_symbol_strategy_override_resolves_without_mutating_global():
     assert aapl.max_entry_to_stop_cents == 90
     assert aapl.no_new_entries_after.hour == 14
     assert aapl.blocked_direction_regimes == ["put:trend_up"]
+    assert aapl.reaction_lookback_bars == 8
+    assert aapl.long_wick_min_frac == 0.4
     assert settings.entry_confirmation == "immediate"
     assert settings.for_symbol("MSFT") is settings
 
@@ -135,3 +155,12 @@ def test_symbol_strategy_override_resolves_without_mutating_global():
 def test_invalid_direction_regime_block_is_rejected():
     with pytest.raises(ValidationError, match="invalid direction/regime"):
         Settings(_env_file=None, blocked_direction_regimes=["put:sideways"])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"reaction_lookback_bars": 1}, {"long_wick_min_frac": 1.1}],
+)
+def test_invalid_price_action_settings_are_rejected(kwargs):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **kwargs)

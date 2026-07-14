@@ -26,6 +26,7 @@ from .market.setups import (
     SPEED_WINDOW,
     TRADE_FLIPPED_LEVELS,
 )
+from .market.price_action import LONG_WICK_MIN_FRAC, REACTION_LOOKBACK_BARS
 from .risk.guardrails import STOP_COOLDOWN_MINUTES, STOP_MAX_CENTS, STOP_MIN_CENTS
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
@@ -35,6 +36,7 @@ REGIMES = {"unknown", "range", "trend_up", "trend_down", "high_volatility"}
 
 
 class SymbolStrategyOverride(BaseModel):
+    multi_timeframe_context: bool | None = None
     entry_confirmation: Literal["immediate", "touch_rejection"] | None = None
     max_entry_to_stop_cents: int | None = None
     no_new_entries_before: time | None = None
@@ -44,6 +46,8 @@ class SymbolStrategyOverride(BaseModel):
     allowed_regimes: list[str] | None = None
     blocked_direction_regimes: list[str] | None = None
     min_level_quality_score: float | None = None
+    reaction_lookback_bars: int | None = None
+    long_wick_min_frac: float | None = None
 
     @field_validator("blocked_direction_regimes")
     @classmethod
@@ -57,6 +61,10 @@ class SymbolStrategyOverride(BaseModel):
             value = getattr(self, name)
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if self.reaction_lookback_bars is not None and self.reaction_lookback_bars < 2:
+            raise ValueError("reaction_lookback_bars must be at least 2")
+        if self.long_wick_min_frac is not None and not 0 <= self.long_wick_min_frac <= 1:
+            raise ValueError("long_wick_min_frac must be between 0 and 1")
         return self
 
 
@@ -85,9 +93,21 @@ class Settings(BaseSettings):
     order_timeout_s: int = 120
     fill_grace_s: int = 15  # post-cancel window for late execution reports
     block_entries_on_delayed_data: bool = True
+    max_option_spread_pct: float = 0.08
+    max_option_spread_cents: int = 30
+    max_option_quote_age_s: float = 5.0
+    entry_budget_reserve_pct: float = 0.05
+    max_entry_drift_atr: float = 0.5
+    max_entry_drift_min_cents: int = 10
+    max_execution_slippage_pct: float = 0.03
+    max_execution_slippage_cents: int = 10
+    max_acceptable_fill_latency_s: float = 10.0
+    execution_diagnostic_max_age_days: int = 7
+    execution_live_confirmed: bool = False
 
     # Strategy
     symbols: Annotated[list[str], NoDecode] = ["SPY"]
+    multi_timeframe_context: bool = False
     max_trades_per_day: int = 2
     max_contracts: int = 4
     max_premium_usd: float = 500.0
@@ -116,6 +136,8 @@ class Settings(BaseSettings):
     min_speed_pct: float = MIN_SPEED_PCT
     fast_approach_speed_mult: float = FAST_APPROACH_SPEED_MULT
     rejection_wick_min_frac: float = REJECTION_WICK_MIN_FRAC
+    reaction_lookback_bars: int = REACTION_LOOKBACK_BARS
+    long_wick_min_frac: float = LONG_WICK_MIN_FRAC
     # Role-reversed levels (a broken support retested as resistance, and vice
     # versa) are chart context, not trades — the worst entry class in backtests.
     trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS
@@ -191,11 +213,13 @@ class Settings(BaseSettings):
     @field_validator(
         "backtest_half_spread_pct", "backtest_slippage_cents",
         "backtest_commission_per_contract", "backtest_min_commission_per_order",
+        "max_option_spread_pct", "entry_budget_reserve_pct", "max_entry_drift_atr",
+        "max_execution_slippage_pct", "max_acceptable_fill_latency_s", "max_option_quote_age_s",
     )
     @classmethod
-    def _nonnegative_backtest_costs(cls, v: float) -> float:
+    def _nonnegative_execution_values(cls, v: float) -> float:
         if v < 0:
-            raise ValueError("backtest execution costs cannot be negative")
+            raise ValueError("execution and backtest values cannot be negative")
         return v
 
     @model_validator(mode="after")
@@ -220,6 +244,16 @@ class Settings(BaseSettings):
                 raise ValueError(f"{name} must be positive")
         if self.atr_window_bars < 2:
             raise ValueError("ATR_WINDOW_BARS must be at least 2")
+        if self.reaction_lookback_bars < 2:
+            raise ValueError("REACTION_LOOKBACK_BARS must be at least 2")
+        if not 0 <= self.long_wick_min_frac <= 1:
+            raise ValueError("LONG_WICK_MIN_FRAC must be between 0 and 1")
+        for name in (
+            "max_option_spread_cents", "max_entry_drift_min_cents",
+            "max_execution_slippage_cents", "execution_diagnostic_max_age_days",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name.upper()} must be positive")
         return self
 
     def for_symbol(self, symbol: str) -> "Settings":

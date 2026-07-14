@@ -17,7 +17,8 @@ from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
 from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
-from ..models import Decision, ExecutedAction, MorningBriefing
+from ..market.timeframes import build_daily_context, build_five_minute_context, rank_candidates
+from ..models import Decision, ExecutedAction, MorningBriefing, MultiTimeframeContext
 from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
 from ..trade import position as pos
@@ -41,6 +42,7 @@ class RuntimeContext:
     _llm: Any = field(default=None, repr=False)
     _prep_llm: Any = field(default=None, repr=False)
     metrics: dict[str, int] = field(default_factory=dict)
+    _daily_context_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def llm(self) -> Any:
@@ -61,13 +63,33 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def fetch_data(state: AgentState) -> dict:
         bars = ctx.broker.get_bars(ctx.symbol)
         prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
-        return {"bars": bars, "prev_day_high": prev_high, "prev_day_low": prev_low}
+        daily_bars = ctx.broker.get_daily_bars(ctx.symbol) if settings.multi_timeframe_context else []
+        return {
+            "bars": bars,
+            "daily_bars": daily_bars,
+            "prev_day_high": prev_high,
+            "prev_day_low": prev_low,
+        }
 
     def compute_context(state: AgentState) -> dict:
         bars = state["bars"]
         if not bars:
             raise RuntimeError("broker returned no bars (data farm down or market closed)")
         snapshot = build_snapshot(ctx.symbol, bars, atr_window=settings.atr_window_bars)
+        if settings.multi_timeframe_context:
+            cache_key = snapshot.ts.astimezone(guardrails.ET).date().isoformat()
+            daily = ctx._daily_context_cache.get(cache_key)
+            if daily is None:
+                daily = build_daily_context(
+                    state.get("daily_bars") or [], snapshot.ts, snapshot.price,
+                )
+                ctx._daily_context_cache = {cache_key: daily}
+            multi = MultiTimeframeContext(
+                enabled=True,
+                daily=daily,
+                five_minute=build_five_minute_context(bars),
+            )
+            snapshot = snapshot.model_copy(update={"multi_timeframe": multi})
         levels = detect_levels(
             bars, state.get("prev_day_high"), state.get("prev_day_low"),
             min_touch_separation=settings.double_min_touch_separation_bars,
@@ -195,14 +217,18 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             min_speed_pct=settings.min_speed_pct,
             fast_approach_mult=settings.fast_approach_speed_mult,
             rejection_wick_frac=settings.rejection_wick_min_frac,
+            reaction_lookback=settings.reaction_lookback_bars,
+            long_wick_min_frac=settings.long_wick_min_frac,
             trade_flipped_levels=settings.trade_flipped_levels,
             entry_confirmation=confirmation,
         )
+        candidates = rank_candidates(candidates, state["snapshot"].multi_timeframe)
         if candidates:
             ctx.journal.write(
                 "candidate_features", ts=state["snapshot"].ts, symbol=ctx.symbol,
                 candidates=candidates, regime=state["snapshot"].regime,
                 atr=state["snapshot"].atr,
+                multi_timeframe=state["snapshot"].multi_timeframe,
             )
         filtered: list[tuple[Any, str]] = []
         if settings.allowed_regimes:

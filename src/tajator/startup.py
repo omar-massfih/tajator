@@ -11,8 +11,9 @@ an order fill and the post-tick state.json write (see recovery.py).
 
 from __future__ import annotations
 
+import json
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from .broker.base import BrokerOpenOrder, BrokerOptionPosition, OrderFailed
 from .config import Settings
@@ -37,6 +38,52 @@ def check_kill_switch(settings: Settings, notifier: Notifier | None = None) -> N
         sys.exit(
             f"kill switch file present at {f}:\n  {text}\n"
             "Reconcile the account in IB Gateway, then delete the file and restart."
+        )
+
+
+def check_execution_diagnostics(settings: Settings, now: datetime | None = None) -> None:
+    """Live mode requires explicit enablement and recent passing paper checks."""
+    if settings.trading_mode != "live":
+        return
+    if not settings.execution_live_confirmed:
+        sys.exit(
+            "live execution is not confirmed. Run supervised paper `tajator test-order` "
+            "checks, then set EXECUTION_LIVE_CONFIRMED=true."
+        )
+    now = now or datetime.now(ET)
+    cutoff = now - timedelta(days=settings.execution_diagnostic_max_age_days)
+    latest: dict[str, tuple[datetime, bool]] = {}
+    for path in sorted(settings.log_dir.glob("journal-*.jsonl")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                event = json.loads(line)
+                if event.get("type") != "execution_diagnostic":
+                    continue
+                ts = datetime.fromisoformat(event["ts"]).astimezone(ET)
+                symbol = str(event.get("symbol", "")).upper()
+                passed = bool(event.get("passed"))
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if symbol and (symbol not in latest or ts > latest[symbol][0]):
+                latest[symbol] = (ts, passed)
+    failures = []
+    for symbol in settings.symbols:
+        result = latest.get(symbol)
+        if result is None:
+            failures.append(f"{symbol}: no paper execution diagnostic")
+        elif result[0] < cutoff:
+            failures.append(f"{symbol}: diagnostic is older than {settings.execution_diagnostic_max_age_days} days")
+        elif not result[1]:
+            failures.append(f"{symbol}: latest diagnostic failed")
+    if failures:
+        sys.exit(
+            "live execution diagnostics are not ready:\n  "
+            + "\n  ".join(failures)
+            + "\nRun `tajator test-order --symbol SYMBOL` in paper mode for each symbol."
         )
 
 

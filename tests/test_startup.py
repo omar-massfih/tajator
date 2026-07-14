@@ -10,7 +10,12 @@ from tajator.config import Settings
 from tajator.journal import Journal
 from tajator.models import ExecutedAction, OpenPosition, ProtectiveStop, SelectedContract
 from tajator.notify import NullNotifier
-from tajator.startup import check_kill_switch, reconcile_positions, run_startup_checks
+from tajator.startup import (
+    check_execution_diagnostics,
+    check_kill_switch,
+    reconcile_positions,
+    run_startup_checks,
+)
 from tajator.state_store import PersistedSession, PersistedState, StateStore
 from tajator.trade.position import build_plan
 
@@ -28,6 +33,44 @@ def make_settings(tmp_path, **kwargs):
         log_dir=tmp_path,
         **kwargs,
     )
+
+
+def test_execution_diagnostic_gate_is_live_only(tmp_path):
+    check_execution_diagnostics(make_settings(tmp_path), now=NOW)
+
+
+def test_live_execution_requires_explicit_confirmation(tmp_path):
+    settings = make_settings(tmp_path, trading_mode="live", ib_port=4001)
+    with pytest.raises(SystemExit, match="EXECUTION_LIVE_CONFIRMED"):
+        check_execution_diagnostics(settings, now=NOW)
+
+
+def test_live_execution_requires_recent_pass_for_every_symbol(tmp_path):
+    settings = make_settings(
+        tmp_path, symbols=["NVDA", "AAPL"], trading_mode="live", ib_port=4001,
+        execution_live_confirmed=True,
+    )
+    journal = Journal(tmp_path)
+    journal.write("execution_diagnostic", ts=NOW, symbol="NVDA", passed=True)
+    with pytest.raises(SystemExit, match="AAPL: no paper execution diagnostic"):
+        check_execution_diagnostics(settings, now=NOW + timedelta(hours=1))
+    journal.write("execution_diagnostic", ts=NOW, symbol="AAPL", passed=True)
+    check_execution_diagnostics(settings, now=NOW + timedelta(hours=1))
+
+
+def test_latest_failed_or_stale_execution_diagnostic_blocks_live(tmp_path):
+    settings = make_settings(
+        tmp_path, trading_mode="live", ib_port=4001, execution_live_confirmed=True,
+    )
+    journal = Journal(tmp_path)
+    journal.write("execution_diagnostic", ts=NOW, symbol="NVDA", passed=True)
+    journal.write(
+        "execution_diagnostic", ts=NOW + timedelta(minutes=1), symbol="NVDA", passed=False,
+    )
+    with pytest.raises(SystemExit, match="latest diagnostic failed"):
+        check_execution_diagnostics(settings, now=NOW + timedelta(hours=1))
+    with pytest.raises(SystemExit, match="older than"):
+        check_execution_diagnostics(settings, now=NOW + timedelta(days=8))
 
 
 def make_position(qty=2, con_id=None, symbol="NVDA", strike=200.0):

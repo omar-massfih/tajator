@@ -36,6 +36,125 @@ class LevelWatch(BaseModel):
     note: str = ""
 
 
+class PriceActionFeatures(BaseModel):
+    """Transparent candle and level-reaction facts attached to a setup.
+
+    Defaults are deliberately neutral so journals/backtests written before this
+    model existed can still be loaded as ``SetupCandidate`` objects.
+    """
+
+    body_fraction: float = 0.0
+    upper_wick_fraction: float = 0.0
+    lower_wick_fraction: float = 0.0
+    close_location: float = 0.5
+    close_rejection_fraction: float = 0.0
+    range_atr: float | None = None
+    relative_volume: float | None = None
+    touched: bool = False
+    reclaimed: bool = False
+    break_and_reclaim: bool = False
+    penetration: float = 0.0
+    rejection_count: int = 0
+    clean_slice: bool = False
+    reaction_labels: list[str] = Field(default_factory=list)
+
+
+class DailyContext(BaseModel):
+    """Causal context built only from completed regular-session daily candles."""
+
+    bias: Literal["bullish", "bearish", "neutral", "unknown"] = "unknown"
+    ema20: float | None = None
+    ema50: float | None = None
+    ema20_slope_5: float | None = None
+    atr14: float | None = None
+    reference_levels: list[Level] = Field(default_factory=list)
+    recent_bars: list[Bar] = Field(default_factory=list)
+
+
+class FiveMinuteContext(BaseModel):
+    """RTH five-minute structure; ``forming_bar`` is explicitly incomplete."""
+
+    trend: Literal["bullish", "bearish", "neutral", "unknown"] = "unknown"
+    ema9: float | None = None
+    ema20: float | None = None
+    atr14: float | None = None
+    completed_bars: list[Bar] = Field(default_factory=list)
+    forming_bar: Bar | None = None
+
+
+class MultiTimeframeContext(BaseModel):
+    enabled: bool = False
+    daily: DailyContext = Field(default_factory=DailyContext)
+    five_minute: FiveMinuteContext = Field(default_factory=FiveMinuteContext)
+
+
+class HigherTimeframeScore(BaseModel):
+    daily_bias: float = 0.0
+    daily_confluence: float = 0.0
+    five_minute_trend: float = 0.0
+    five_minute_reaction: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return round(
+            self.daily_bias + self.daily_confluence
+            + self.five_minute_trend + self.five_minute_reaction,
+            2,
+        )
+
+
+class OptionQuote(BaseModel):
+    """One broker quote captured immediately before an option order."""
+
+    bid: float | None = None
+    ask: float | None = None
+    last: float | None = None
+    ts: datetime
+    delayed: bool = False
+    source: str = "broker"
+
+    @property
+    def valid(self) -> bool:
+        return bool(
+            self.bid is not None and self.ask is not None
+            and self.bid > 0 and self.ask > 0 and self.bid <= self.ask
+        )
+
+    @property
+    def midpoint(self) -> float | None:
+        return (self.bid + self.ask) / 2 if self.valid else None
+
+    @property
+    def spread(self) -> float | None:
+        return self.ask - self.bid if self.valid else None
+
+
+class ExecutionQuality(BaseModel):
+    """Arrival quote, timing, and realized quality for one broker fill."""
+
+    side: Literal["BUY", "SELL"]
+    order_type: str = "MKT"
+    order_id: int | None = None
+    perm_id: int | None = None
+    status: str = ""
+    requested_qty: int
+    filled_qty: int
+    signal_ts: datetime | None = None
+    preflight_ts: datetime | None = None
+    submitted_at: datetime
+    filled_at: datetime
+    quote: OptionQuote | None = None
+    underlying_signal: float | None = None
+    underlying_submit: float | None = None
+    underlying_fill: float | None = None
+    fill_price: float
+    latency_s: float
+    reference_price: float | None = None
+    slippage: float | None = None
+    slippage_pct: float | None = None
+    breaches: list[str] = Field(default_factory=list)
+
+
 class MorningBriefing(BaseModel):
     """Structured output of the pre-market prep LLM call. Planning only — no trade results from it."""
 
@@ -56,6 +175,9 @@ class SetupCandidate(BaseModel):
     note: str = ""
     regime: str = "unknown"
     quality_score: float = 0.0
+    higher_timeframe_score: HigherTimeframeScore = Field(default_factory=HigherTimeframeScore)
+    ranking_score: float = 0.0
+    price_action: PriceActionFeatures = Field(default_factory=PriceActionFeatures)
 
 
 class Snapshot(BaseModel):
@@ -74,6 +196,7 @@ class Snapshot(BaseModel):
     vwap_slope_15: float | None = None
     closes_above_vwap_frac: float | None = None
     regime: str = "unknown"
+    multi_timeframe: MultiTimeframeContext | None = None
 
 
 class Decision(BaseModel):
@@ -156,3 +279,4 @@ class ExecutedAction(BaseModel):
     equity_price: float
     ts: datetime
     reason: str = ""
+    execution_quality: ExecutionQuality | None = None

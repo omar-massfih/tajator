@@ -1,6 +1,6 @@
 from tajator.llm.decide import decide_entry, decide_prep, decide_scale, format_prep_snapshot, format_snapshot
 from tajator.market.indicators import build_snapshot
-from tajator.models import Decision, Level, MorningBriefing, SetupCandidate
+from tajator.models import Decision, Level, MorningBriefing, PriceActionFeatures, SetupCandidate
 
 from conftest import ts, walk
 
@@ -30,6 +30,35 @@ def test_format_snapshot_contains_key_facts():
     assert "prev_day_low" in text
     assert "DETECTED SETUP CANDIDATES" in text
     assert "trades taken today: 1" in text
+
+
+def test_format_snapshot_exposes_price_action_features():
+    bars = walk(ts(9, 30), [500.0, 499.8, 499.5, 499.2])
+    snap = build_snapshot("SPY", bars)
+    level = Level(price=499.0, kind="support", label="prev_day_low")
+    cand = SetupCandidate(
+        direction="call", level=level, distance=0.2, speed=-0.8, quality_score=4.5,
+        price_action=PriceActionFeatures(
+            lower_wick_fraction=0.4, touched=True, reclaimed=True,
+            rejection_count=2, reaction_labels=["long_lower_wick", "higher_low"],
+        ),
+    )
+    text = format_snapshot(bars, snap, [level], [cand], trades_today=0)
+    assert "quality 4.50" in text
+    assert "lower wick 0.40" in text
+    assert "rejections=2" in text
+    assert "long_lower_wick, higher_low" in text
+
+
+def test_old_candidate_payload_gets_neutral_price_action_default():
+    candidate = SetupCandidate.model_validate({
+        "direction": "call",
+        "level": {"price": 499.0, "kind": "support", "label": "prev_day_low"},
+        "distance": 0.2,
+        "speed": -0.8,
+    })
+    assert candidate.price_action.reaction_labels == []
+    assert candidate.price_action.touched is False
 
 
 def test_entry_error_falls_back_to_wait():

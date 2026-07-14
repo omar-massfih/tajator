@@ -18,7 +18,14 @@ from ib_async.order import PriceCondition
 
 from ..config import Settings
 from ..journal import Journal
-from ..models import Bar, Direction, ProtectiveStop, SelectedContract
+from ..models import (
+    Bar,
+    Direction,
+    ExecutionQuality,
+    OptionQuote,
+    ProtectiveStop,
+    SelectedContract,
+)
 from ..notify import Notifier, NullNotifier
 from .base import (
     Broker,
@@ -47,6 +54,7 @@ class IBBroker(Broker):
         self.journal: Journal | None = None  # set by callers that want order timelines
         self._stocks: dict[str, Stock] = {}
         self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
+        self._daily_bars_cache: dict[str, tuple[str, list[Bar]]] = {}
         self._qualified: dict[str, Option] = {}
         self._delayed = False
         # subscribe before connect() so connect-time errors are seen too
@@ -55,8 +63,13 @@ class IBBroker(Broker):
         # without a record of when statuses and executions actually arrived
         self.ib.orderStatusEvent += self._on_order_status
         self.ib.execDetailsEvent += self._on_exec_details
+        self.ib.commissionReportEvent += self._on_commission_report
 
     # -- lifecycle ---------------------------------------------------------------
+
+    @property
+    def uses_live_execution_guards(self) -> bool:
+        return True
 
     def connect(self) -> None:
         s = self.settings
@@ -104,6 +117,20 @@ class IBBroker(Broker):
         log.info(
             "execution #%s/%s: %s %gx @ %s (%s)",
             ex.orderId, ex.permId or "-", ex.side, ex.shares, ex.price, ex.time,
+        )
+
+    def _on_commission_report(self, trade, fill, report) -> None:
+        if self.journal is None:
+            return
+        execution = getattr(fill, "execution", None)
+        self.journal.write(
+            "commission_report",
+            symbol=getattr(trade.contract, "symbol", ""),
+            order_id=getattr(execution, "orderId", None),
+            exec_id=getattr(execution, "execId", ""),
+            commission=float(getattr(report, "commission", 0.0) or 0.0),
+            currency=getattr(report, "currency", ""),
+            realized_pnl=getattr(report, "realizedPNL", None),
         )
 
     def _journal_order_timeline(self, trade, label: str) -> None:
@@ -256,6 +283,35 @@ class IBBroker(Broker):
         prev = prior[-1]
         return float(prev.high), float(prev.low)
 
+    def get_daily_bars(self, symbol: str, lookback_days: int = 90) -> list[Bar]:
+        """Fetch daily history once per symbol/session; consumers exclude today causally."""
+        today = self.now().date().isoformat()
+        cached = self._daily_bars_cache.get(symbol)
+        if cached and cached[0] == today:
+            return cached[1][-lookback_days:]
+        # 140 calendar days comfortably covers 90 US trading sessions.
+        raw = self.ib.reqHistoricalData(
+            self._underlying(symbol),
+            endDateTime="",
+            durationStr="140 D",
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=2,
+        )
+        bars = [
+            Bar(
+                ts=(b.date.astimezone(ET) if isinstance(b.date, datetime)
+                    and b.date.tzinfo is not None else
+                    datetime.combine(_bar_date(b.date), datetime.min.time(), tzinfo=ET)),
+                open=float(b.open), high=float(b.high), low=float(b.low), close=float(b.close),
+                volume=float(b.volume) if b.volume and not math.isnan(b.volume) else 0.0,
+            )
+            for b in raw
+        ]
+        self._daily_bars_cache[symbol] = (today, bars)
+        return bars[-lookback_days:]
+
     def get_option_chain(self, symbol: str) -> ChainParams:
         today = self.now().date().isoformat()
         cached = self._chain_cache.get(symbol)
@@ -313,6 +369,43 @@ class IBBroker(Broker):
             return None
         return float(price)
 
+    @staticmethod
+    def _positive_price(value) -> float | None:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return price if math.isfinite(price) and price > 0 else None
+
+    def get_option_quote(self, contract: SelectedContract) -> OptionQuote:
+        opt = self._option(contract)
+        [ticker] = self.ib.reqTickers(opt)
+        quote_ts = getattr(ticker, "time", None)
+        if isinstance(quote_ts, datetime):
+            quote_ts = (
+                quote_ts.replace(tzinfo=ET)
+                if quote_ts.tzinfo is None
+                else quote_ts.astimezone(ET)
+            )
+        else:
+            quote_ts = self.now()
+        return OptionQuote(
+            bid=self._positive_price(getattr(ticker, "bid", None)),
+            ask=self._positive_price(getattr(ticker, "ask", None)),
+            last=self._positive_price(getattr(ticker, "last", None)),
+            ts=quote_ts,
+            delayed=self._delayed,
+            source="ib_delayed" if self._delayed else "ib_live",
+        )
+
+    def get_underlying_price(self, symbol: str) -> float | None:
+        [ticker] = self.ib.reqTickers(self._underlying(symbol))
+        return self._positive_price(ticker.marketPrice())
+
+    def record_execution_preflight(self, **payload: object) -> None:
+        if self.journal is not None:
+            self.journal.write("execution_preflight", **payload)
+
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill:
         return self._place(contract, "BUY", qty)
 
@@ -322,9 +415,21 @@ class IBBroker(Broker):
     def _place(self, contract: SelectedContract, side: str, qty: int) -> Fill:
         opt = self._option(contract)
         qty_before = self._snapshot_position(opt)
+        try:
+            arrival_quote = self.get_option_quote(contract)
+        except Exception:  # exits must never fail merely because a quote request failed
+            log.exception("could not capture arrival quote for %s", contract.local_name)
+            arrival_quote = None
+        try:
+            underlying_submit = self.get_underlying_price(contract.symbol)
+        except Exception:
+            log.exception("could not capture underlying at submission for %s", contract.symbol)
+            underlying_submit = None
         order = MarketOrder(side, qty)
         order.tif = "DAY"
         order.orderRef = f"{self.settings.order_ref_prefix}:{contract.symbol}"
+        submitted_at = self.now()
+        started = time.monotonic()
         trade = self.ib.placeOrder(opt, order)
         deadline = time.monotonic() + self.settings.order_timeout_s
         while not trade.isDone() and time.monotonic() < deadline:
@@ -336,11 +441,94 @@ class IBBroker(Broker):
             cancel_deadline = time.monotonic() + CANCEL_TIMEOUT_S
             while not trade.isDone() and time.monotonic() < cancel_deadline:
                 self.ib.waitOnUpdate(timeout=1.0)
-        if trade.orderStatus.status == "Filled":
-            return Fill(
+        try:
+            if trade.orderStatus.status == "Filled":
+                fill = Fill(
                 premium=float(trade.orderStatus.avgFillPrice), qty=qty, ts=self.now()
+                )
+            else:
+                fill = self._resolve_unfilled(trade, opt, contract, side, qty, qty_before)
+        except Exception:
+            self._journal_order_timeline(
+                trade, f"{side} {qty}x {contract.local_name} failed"
             )
-        return self._resolve_unfilled(trade, opt, contract, side, qty, qty_before)
+            raise
+        self._journal_order_timeline(
+            trade, f"{side} {qty}x {contract.local_name} filled {fill.qty}/{qty}"
+        )
+        return self._finalize_execution_quality(
+            fill, trade, contract, side, qty, arrival_quote,
+            submitted_at, started, underlying_submit,
+        )
+
+    def _finalize_execution_quality(
+        self, fill: Fill, trade, contract: SelectedContract, side: str, requested: int,
+        quote: OptionQuote | None, submitted_at: datetime, started: float,
+        underlying_submit: float | None,
+    ) -> Fill:
+        filled_at = fill.ts
+        latency = max(0.0, time.monotonic() - started)
+        try:
+            underlying_fill = self.get_underlying_price(contract.symbol)
+        except Exception:
+            log.exception("could not capture underlying at fill for %s", contract.symbol)
+            underlying_fill = None
+        reference = None
+        if quote is not None and quote.valid:
+            reference = quote.ask if side == "BUY" else quote.bid
+        slippage = None
+        slippage_pct = None
+        if reference is not None:
+            slippage = max(0.0, fill.premium - reference) if side == "BUY" else max(0.0, reference - fill.premium)
+            slippage_pct = slippage / reference if reference > 0 else None
+        breaches: list[str] = []
+        if latency > self.settings.max_acceptable_fill_latency_s:
+            breaches.append(
+                f"fill latency {latency:.1f}s exceeds {self.settings.max_acceptable_fill_latency_s:g}s"
+            )
+        if slippage is not None:
+            allowed = min(
+                self.settings.max_execution_slippage_cents / 100,
+                self.settings.max_execution_slippage_pct * reference,
+            )
+            if slippage > allowed:
+                breaches.append(f"adverse slippage {slippage:.2f} exceeds {allowed:.2f}")
+        if side == "BUY" and fill.premium * fill.qty * 100 > self.settings.max_premium_usd:
+            breaches.append(
+                f"filled cost ${fill.premium * fill.qty * 100:.0f} exceeds "
+                f"${self.settings.max_premium_usd:.0f} budget"
+            )
+        quality = ExecutionQuality(
+            side=side,
+            order_id=int(getattr(trade.order, "orderId", 0) or 0) or None,
+            perm_id=int(getattr(trade.order, "permId", 0) or 0) or None,
+            status=trade.orderStatus.status,
+            requested_qty=requested,
+            filled_qty=fill.qty,
+            submitted_at=submitted_at,
+            filled_at=filled_at,
+            quote=quote,
+            underlying_submit=underlying_submit,
+            underlying_fill=underlying_fill,
+            fill_price=fill.premium,
+            latency_s=round(latency, 3),
+            reference_price=reference,
+            slippage=round(slippage, 4) if slippage is not None else None,
+            slippage_pct=round(slippage_pct, 6) if slippage_pct is not None else None,
+            breaches=breaches,
+        )
+        fill.execution_quality = quality
+        if self.journal is not None:
+            self.journal.write(
+                "execution_quality", symbol=contract.symbol,
+                contract=contract, execution_quality=quality,
+            )
+        if breaches:
+            self._halt_new_entries(
+                f"execution quality breach on {side} {fill.qty}x {contract.local_name}: "
+                + "; ".join(breaches)
+            )
+        return fill
 
     def _resolve_unfilled(
         self, trade, opt: Option, contract: SelectedContract, side: str, qty: int,
@@ -361,8 +549,6 @@ class IBBroker(Broker):
         confirmed = delta is not None and delta == from_fills
         filled = from_fills if confirmed else max(reported, from_fills, delta or 0)
         label = f"{side} {qty}x {contract.local_name} ended {status} (filled {filled}/{qty})"
-        self._journal_order_timeline(trade, label)
-
         premium = self._fill_premium(trade, filled)
         if filled and premium is not None:
             full_confirmed_fill = filled == qty and confirmed

@@ -8,7 +8,14 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from ..models import Bar, Direction, ProtectiveStop, SelectedContract
+from ..models import (
+    Bar,
+    Direction,
+    ExecutionQuality,
+    OptionQuote,
+    ProtectiveStop,
+    SelectedContract,
+)
 
 
 class ChainParams(BaseModel):
@@ -26,6 +33,7 @@ class Fill(BaseModel):
     exit_reason: str = ""
     regime: str = "unknown"
     level_quality_score: float = 0.0
+    execution_quality: ExecutionQuality | None = None
 
 
 class BrokerOptionPosition(BaseModel):
@@ -96,6 +104,11 @@ class OrderFailed(RuntimeError):
 
 
 class Broker(ABC):
+    @property
+    def uses_live_execution_guards(self) -> bool:
+        """Whether entry sizing/preflight should require real-time bid/ask data."""
+        return False
+
     def ensure_connected(self) -> bool:
         """Reconnect if the underlying session dropped. Returns True if a
         reconnect happened; no-op (False) for in-memory brokers."""
@@ -112,11 +125,31 @@ class Broker(ABC):
     def get_prev_day_range(self, symbol: str) -> tuple[float | None, float | None]:
         """(high, low) of the previous regular session."""
 
+    def get_daily_bars(self, symbol: str, lookback_days: int = 90) -> list[Bar]:
+        """Completed/recent daily candles for optional higher-timeframe context."""
+        return []
+
     @abstractmethod
     def get_option_chain(self, symbol: str) -> ChainParams: ...
 
     @abstractmethod
     def get_option_premium(self, contract: SelectedContract) -> float | None: ...
+
+    def get_option_quote(self, contract: SelectedContract) -> OptionQuote:
+        """Structured quote. In-memory brokers synthesize a zero-spread quote."""
+        premium = self.get_option_premium(contract)
+        return OptionQuote(
+            bid=premium, ask=premium, last=premium, ts=self.now(), source="synthetic"
+        )
+
+    def get_underlying_price(self, symbol: str) -> float | None:
+        """Current underlying reference used at the execution boundary."""
+        bars = self.get_bars(symbol, lookback_minutes=1)
+        return bars[-1].close if bars else None
+
+    def record_execution_preflight(self, **payload: object) -> None:
+        """Optional live-broker telemetry hook; replay/backtest brokers ignore it."""
+        return None
 
     @abstractmethod
     def buy_option(self, contract: SelectedContract, qty: int) -> Fill: ...

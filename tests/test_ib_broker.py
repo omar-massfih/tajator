@@ -7,7 +7,8 @@ import pytest
 from tajator.broker.base import OrderFailed
 from tajator.broker.ib import IBBroker
 from tajator.config import Settings
-from tajator.models import ProtectiveStop, SelectedContract
+from tajator.journal import Journal
+from tajator.models import OptionQuote, ProtectiveStop, SelectedContract
 
 
 @pytest.fixture
@@ -204,18 +205,75 @@ def test_clean_filled_path_untouched(settings, monkeypatch):
     assert not settings.kill_switch_file.exists()
 
 
-def test_normal_market_orders_are_explicit_day(settings, monkeypatch):
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_normal_market_orders_are_explicit_day(settings, monkeypatch, side):
     trade = make_trade(status="Filled", status_filled=1, avg_price=2.50)
     broker = IBBroker(settings)
-    fake_ib = FakeIB(trade, fill_effect=1)
+    fake_ib = FakeIB(trade, qty_before=0 if side == "BUY" else 1, fill_effect=1)
     broker.ib = fake_ib
     monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
     contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")
 
-    broker._place(contract, "BUY", 1)
+    broker._place(contract, side, 1)
 
     _, _, order = fake_ib.placed[0]
+    assert order.orderType == "MKT"
     assert order.tif == "DAY"
+
+
+def quality_broker(settings, monkeypatch, *, fill_price, quote, side="BUY", latency=1.0):
+    trade = make_trade(status="Filled", status_filled=1, avg_price=fill_price)
+    trade.contract = SimpleNamespace(symbol="NVDA")
+    trade.log = []
+    broker = IBBroker(settings)
+    broker.journal = Journal(settings.log_dir)
+    broker.ib = FakeIB(trade, qty_before=0 if side == "BUY" else 1, fill_effect=1)
+    monkeypatch.setattr(broker, "_option", lambda c: SimpleNamespace(conId=CON_ID))
+    monkeypatch.setattr(broker, "get_option_quote", lambda c: quote)
+    monkeypatch.setattr(broker, "get_underlying_price", lambda symbol: 200.0)
+    times = iter([100.0, 100.0, 100.0 + latency])
+    monkeypatch.setattr("tajator.broker.ib.time.monotonic", lambda: next(times))
+    contract = SelectedContract(symbol="NVDA", expiry="20260710", strike=200.0, right="P")
+    return broker, contract
+
+
+def test_clean_fill_journals_timeline_and_execution_quality(settings, monkeypatch):
+    quote = OptionQuote(bid=2.0, ask=2.05, ts=IBBroker(settings).now())
+    broker, contract = quality_broker(
+        settings, monkeypatch, fill_price=2.05, quote=quote,
+    )
+    fill = broker._place(contract, "BUY", 1)
+    assert fill.execution_quality.latency_s == 1.0
+    assert fill.execution_quality.breaches == []
+    events = [line for line in settings.log_dir.glob("journal-*.jsonl")]
+    text = "\n".join(path.read_text() for path in events)
+    assert '"type": "order_timeline"' in text
+    assert '"type": "execution_quality"' in text
+
+
+def test_slow_slipped_over_budget_fill_is_adopted_and_halts(settings, monkeypatch):
+    quote = OptionQuote(bid=4.4, ask=4.5, ts=IBBroker(settings).now())
+    broker, contract = quality_broker(
+        settings, monkeypatch, fill_price=5.4, quote=quote, latency=12.0,
+    )
+    fill = broker._place(contract, "BUY", 1)
+    assert fill.qty == 1
+    assert len(fill.execution_quality.breaches) == 3
+    assert "latency" in fill.execution_quality.breaches[0]
+    assert "slippage" in fill.execution_quality.breaches[1]
+    assert "budget" in fill.execution_quality.breaches[2]
+    assert settings.kill_switch_file.exists()
+
+
+def test_market_exit_proceeds_without_valid_quote(settings, monkeypatch):
+    quote = OptionQuote(bid=None, ask=None, ts=IBBroker(settings).now())
+    broker, contract = quality_broker(
+        settings, monkeypatch, fill_price=1.5, quote=quote, side="SELL",
+    )
+    fill = broker._place(contract, "SELL", 1)
+    assert fill.qty == 1
+    assert fill.execution_quality.reference_price is None
+    assert fill.execution_quality.breaches == []
 
 
 # -- protective stop ------------------------------------------------------------

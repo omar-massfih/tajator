@@ -15,6 +15,7 @@ from .graph.state import AgentState
 from .llm.decide import decide_prep, format_prep_snapshot, no_llm_briefing
 from .market.indicators import build_snapshot
 from .market.levels import detect_levels
+from .market.timeframes import build_multi_timeframe_context
 from .models import OpenPosition
 from .state_store import PersistedSession, StateStore
 from .trade.execution import execute_exit
@@ -175,6 +176,12 @@ class TradingSession:
             cluster_tol=ctx.settings.level_cluster_tol_pct,
         )
         snapshot = build_snapshot(ctx.symbol, bars)
+        settings = ctx.settings.for_symbol(ctx.symbol)
+        if settings.multi_timeframe_context:
+            multi = build_multi_timeframe_context(
+                bars, ctx.broker.get_daily_bars(ctx.symbol), snapshot.ts, snapshot.price,
+            )
+            snapshot = snapshot.model_copy(update={"multi_timeframe": multi})
         if ctx.use_llm:
             text = format_prep_snapshot(ctx.symbol, snapshot, levels)
             briefing = decide_prep(ctx.prep_llm, ctx.symbol, levels, text)
@@ -325,8 +332,9 @@ class LiveRunner:
 
     def run(self) -> None:
         mode = self.sessions[0].ctx.settings.trading_mode.upper()
+        decisions = "LLM" if self.sessions[0].ctx.use_llm else "DETERMINISTIC"
         symbols = ", ".join(sess.ctx.symbol for sess in self.sessions)
-        banner = f"=== tajator | {symbols} | {mode} ==="
+        banner = f"=== tajator | {symbols} | {mode} | {decisions} ==="
         if mode == "LIVE":
             banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
         print(banner)
