@@ -17,7 +17,7 @@ from ..broker.stub import StubBroker
 from ..config import Settings
 from ..graph.nodes import RuntimeContext
 from ..journal import Journal
-from ..llm.decide import build_llm
+from ..llm.decide import build_llm, build_vision_llm
 from ..runner import TradingSession
 from .data import (
     ET,
@@ -40,6 +40,7 @@ def run_backtest(
     experiment: str = "baseline",
     chain_override: ChainParams | None = None,
     option_panel: bool = False,
+    vision_patterns: bool = False,
 ) -> BacktestReport:
     days = trading_days(start, end)
     # Underlying research already loads every minute of every session. Derive
@@ -57,6 +58,7 @@ def run_backtest(
         f"{symbol}_{start.isoformat()}_{end.isoformat()}_{experiment}"
     )
     llm = build_llm(settings.llm_model) if use_llm else None
+    vision_llm = build_vision_llm(settings.llm_model) if vision_patterns else None
 
     fills_by_day = {}
     bars_by_day = {}
@@ -88,7 +90,8 @@ def run_backtest(
         )
         ctx = RuntimeContext(
             settings=settings, broker=broker, journal=journal, symbol=symbol,
-            use_llm=use_llm, _llm=llm, metrics=metrics,
+            use_llm=use_llm, vision_patterns=vision_patterns,
+            _llm=llm, _vision_llm=vision_llm, metrics=metrics,
         )
         try:
             TradingSession(ctx).run_replay(broker, verbose=False)
@@ -128,6 +131,7 @@ def run_backtest(
     resolved_config = _strategy_config(settings.for_symbol(symbol))
     metadata = {
         "use_llm": use_llm,
+        "vision_patterns": vision_patterns,
         "llm_model": settings.llm_model if use_llm else None,
         "code_revision": _code_revision(),
         "execution_model": {

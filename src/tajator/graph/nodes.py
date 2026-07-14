@@ -13,12 +13,19 @@ from typing import Any
 from ..broker.base import Broker, OrderFailed
 from ..config import Settings
 from ..journal import Journal
-from ..llm.decide import build_llm, decide_entry, decide_scale, format_snapshot
+from ..llm.decide import build_llm, build_vision_llm, decide_entry, decide_scale, format_snapshot
+from ..llm.vision import decide_vision, render_bar_chart, validate_vision_entry
 from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
 from ..market.timeframes import build_daily_context, build_five_minute_context, rank_candidates
-from ..models import Decision, ExecutedAction, MorningBriefing, MultiTimeframeContext
+from ..models import (
+    Decision,
+    ExecutedAction,
+    MorningBriefing,
+    MultiTimeframeContext,
+    VisionPatternAnalysis,
+)
 from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
 from ..trade import position as pos
@@ -38,11 +45,14 @@ class RuntimeContext:
     journal: Journal
     symbol: str
     use_llm: bool = True
+    vision_patterns: bool = False
     notifier: Notifier = field(default_factory=NullNotifier)
     _llm: Any = field(default=None, repr=False)
     _prep_llm: Any = field(default=None, repr=False)
+    _vision_llm: Any = field(default=None, repr=False)
     metrics: dict[str, int] = field(default_factory=dict)
     _daily_context_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+    _last_vision_bar_ts: Any = field(default=None, repr=False)
 
     @property
     def llm(self) -> Any:
@@ -55,6 +65,12 @@ class RuntimeContext:
         if self._prep_llm is None:
             self._prep_llm = build_llm(self.settings.llm_model, output_model=MorningBriefing)
         return self._prep_llm
+
+    @property
+    def vision_llm(self) -> Any:
+        if self._vision_llm is None:
+            self._vision_llm = build_vision_llm(self.settings.llm_model)
+        return self._vision_llm
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
@@ -204,6 +220,39 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     # ----- flat branch --------------------------------------------------------
 
     def detect_setups(state: AgentState) -> dict:
+        if ctx.vision_patterns:
+            bars = state["bars"]
+            bar_ts = bars[-1].ts
+            now_et = bar_ts.astimezone(guardrails.ET)
+            session_minute = now_et.hour * 60 + now_et.minute - (9 * 60 + 30)
+            due = (
+                len(bars) >= settings.vision_pattern_min_bars
+                and session_minute >= 0
+                and session_minute % settings.vision_pattern_scan_interval_bars == 0
+                and bar_ts != ctx._last_vision_bar_ts
+            )
+            if not due:
+                return {"candidates": [], "vision_scan_due": False}
+            ctx._last_vision_bar_ts = bar_ts
+            blockers = guardrails.entry_blockers(
+                now=ctx.broker.now(),
+                position=state.get("position"),
+                trades_today=state.get("trades_today", 0),
+                settings=settings,
+                delayed_data=ctx.broker.is_delayed_data,
+            )
+            if blockers:
+                ctx.metrics["entry_blocker"] = ctx.metrics.get("entry_blocker", 0) + 1
+                ctx.journal.write(
+                    "entry_pre_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                    candidates=[], violations=blockers, source="vision_patterns",
+                )
+            return {
+                "candidates": [],
+                "vision_scan_due": True,
+                "entry_blockers": blockers,
+            }
+
         now_et = state["snapshot"].ts.astimezone(guardrails.ET).time()
         confirmation = settings.entry_confirmation
         if settings.opening_confirmation_until and now_et < settings.opening_confirmation_until:
@@ -304,7 +353,55 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
 
     def llm_decide(state: AgentState) -> dict:
         snapshot, candidates = state["snapshot"], state["candidates"]
-        if not ctx.use_llm:
+        update: dict[str, Any] = {}
+        if ctx.vision_patterns:
+            chart = render_bar_chart(
+                ctx.symbol,
+                state["bars"],
+                limit=settings.vision_pattern_lookback_bars,
+            )
+            context = (
+                f"{ctx.symbol} at {snapshot.ts:%Y-%m-%d %H:%M} ET; "
+                f"latest completed close {snapshot.price:.2f}; ATR "
+                f"{snapshot.atr if snapshot.atr is not None else 'n/a'}. "
+                "Classify only the completed bars shown in the image."
+            )
+            try:
+                analysis = decide_vision(ctx.vision_llm, context, chart)
+            except Exception as exc:  # noqa: BLE001 - model construction must fail closed
+                analysis = VisionPatternAnalysis(
+                    action="wait",
+                    reasoning=f"vision LLM unavailable, defaulting to wait: {exc}",
+                )
+            decision, candidate, violations = validate_vision_entry(
+                analysis, state["bars"], snapshot, settings,
+            )
+            vision_candidates = [candidate] if candidate is not None else []
+            if candidate is not None:
+                vision_candidates, cooled = guardrails.cooldown_filter(
+                    vision_candidates, state.get("cooldown_levels") or []
+                )
+                if cooled:
+                    decision = Decision(
+                        action="wait",
+                        reasoning="vision pattern rejected: breakout level is under stop cooldown",
+                    )
+                    violations.append("breakout level is under stop cooldown")
+            ctx.journal.write(
+                "vision_pattern_analysis",
+                ts=snapshot.ts,
+                symbol=ctx.symbol,
+                analysis=analysis,
+                validation_violations=violations,
+                chart={
+                    "sha256": chart.sha256,
+                    "bar_count": chart.bar_count,
+                    "width": chart.width,
+                    "height": chart.height,
+                },
+            )
+            update["candidates"] = vision_candidates
+        elif not ctx.use_llm:
             c = candidates[0]
             buffer = settings.stop_buffer_cents / 100
             if settings.stop_atr_multiplier is not None and snapshot.atr is not None:
@@ -342,7 +439,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             )
             decision = decision.model_copy(update={"stop_price": round(stop, 2)})
         ctx.journal.write("llm_decision", ts=snapshot.ts, symbol=ctx.symbol, mode="entry", decision=decision)
-        return {"decision": decision}
+        return {"decision": decision, **update}
 
     def risk_gate(state: AgentState) -> dict:
         verdict = guardrails.check(

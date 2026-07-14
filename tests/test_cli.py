@@ -35,16 +35,38 @@ def test_run_llm_flag_is_an_explicit_opt_in(monkeypatch):
     assert seen == [False]
 
 
+def test_run_vision_patterns_is_an_explicit_opt_in(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli, "cmd_run",
+        lambda args: seen.append((args.deterministic, args.vision_patterns)),
+    )
+    monkeypatch.setattr(sys, "argv", ["tajator", "run", "--vision-patterns"])
+    cli.main()
+    assert seen == [(False, True)]
+
+
 def test_runtime_policy_metadata_labels_validation_compatibility():
     settings = Settings(_env_file=None, symbols=["AAPL"])
     deterministic = cli._runtime_policy_metadata(settings, True)
     llm = cli._runtime_policy_metadata(settings, False)
+    vision = cli._runtime_policy_metadata(settings, False, True)
     assert deterministic["policy_mode"] == "deterministic"
     assert deterministic["validation_compatible"] is True
     assert deterministic["cohort_fingerprints"]["AAPL"]
     assert llm["policy_mode"] == "llm"
     assert llm["validation_compatible"] is False
     assert llm["cohort_fingerprints"] == {}
+    assert vision["policy_mode"] == "vision_patterns"
+    assert vision["validation_compatible"] is False
+
+
+def test_vision_patterns_refuses_live_trading_before_connecting(monkeypatch):
+    settings = Settings(_env_file=None, trading_mode="live", ib_port=4001)
+    monkeypatch.setattr(cli, "load_settings", lambda: settings)
+
+    with pytest.raises(SystemExit, match="restricted to TRADING_MODE=paper"):
+        cli.cmd_run(SimpleNamespace(vision_patterns=True, deterministic=False))
 
 
 def test_forward_latest_has_dedicated_default_client_id(monkeypatch):

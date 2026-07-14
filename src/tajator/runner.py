@@ -332,7 +332,10 @@ class LiveRunner:
 
     def run(self) -> None:
         mode = self.sessions[0].ctx.settings.trading_mode.upper()
-        decisions = "LLM" if self.sessions[0].ctx.use_llm else "DETERMINISTIC"
+        decisions = (
+            "VISION PATTERNS" if self.sessions[0].ctx.vision_patterns else
+            "LLM" if self.sessions[0].ctx.use_llm else "DETERMINISTIC"
+        )
         symbols = ", ".join(sess.ctx.symbol for sess in self.sessions)
         banner = f"=== tajator | {symbols} | {mode} | {decisions} ==="
         if mode == "LIVE":

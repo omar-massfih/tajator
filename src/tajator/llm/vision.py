@@ -7,10 +7,14 @@ import hashlib
 import io
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ..models import Bar, VisionPatternAnalysis
+from ..models import Bar, Decision, Level, SetupCandidate, Snapshot, VisionPatternAnalysis
+
+if TYPE_CHECKING:
+    from ..config import Settings
 
 log = logging.getLogger(__name__)
 
@@ -159,3 +163,109 @@ def decide_vision(llm, context: str, chart: ChartImage) -> VisionPatternAnalysis
             status="none",
             reasoning=f"vision LLM error, defaulting to wait: {exc}",
         )
+
+
+def validate_vision_entry(
+    analysis: VisionPatternAnalysis,
+    bars: list[Bar],
+    snapshot: Snapshot,
+    settings: "Settings",
+) -> tuple[Decision, SetupCandidate | None, list[str]]:
+    """Turn a chart read into an ordinary candidate only after causal checks."""
+    if analysis.action == "wait":
+        return Decision(action="wait", reasoning=analysis.reasoning), None, []
+
+    violations: list[str] = []
+    expected_direction = PATTERN_DIRECTIONS.get(analysis.pattern)
+    direction = "call" if analysis.action == "enter_call" else "put"
+    if expected_direction is None:
+        violations.append(f"pattern {analysis.pattern!r} is not in the executable catalog")
+    elif expected_direction != direction:
+        violations.append(
+            f"{analysis.pattern} maps to {expected_direction}, not {direction}"
+        )
+    if analysis.status != "confirmed":
+        violations.append(f"pattern status is {analysis.status}, not confirmed")
+    if analysis.confidence < settings.vision_pattern_min_confidence:
+        violations.append(
+            f"confidence {analysis.confidence:.2f} below "
+            f"{settings.vision_pattern_min_confidence:.2f} minimum"
+        )
+    breakout, invalidation = analysis.breakout_price, analysis.invalidation_price
+    if breakout is None or invalidation is None:
+        violations.append("confirmed pattern requires breakout_price and invalidation_price")
+    else:
+        chart_bars = bars[-settings.vision_pattern_lookback_bars :]
+        chart_low = min(bar.low for bar in chart_bars)
+        chart_high = max(bar.high for bar in chart_bars)
+        if not chart_low <= breakout <= chart_high:
+            violations.append("breakout_price is outside the visible chart range")
+        if not chart_low <= invalidation <= chart_high:
+            violations.append("invalidation_price is outside the visible chart range")
+        if direction == "call" and invalidation >= breakout:
+            violations.append("call invalidation must be below the breakout")
+        if direction == "put" and invalidation <= breakout:
+            violations.append("put invalidation must be above the breakout")
+
+        recent = bars[-4:]
+        if direction == "call":
+            crossed = any(a.close <= breakout < b.close for a, b in zip(recent, recent[1:]))
+            chase = snapshot.price - breakout
+            if not crossed or snapshot.price < breakout:
+                violations.append("completed bars do not confirm an upside breakout")
+        else:
+            crossed = any(a.close >= breakout > b.close for a, b in zip(recent, recent[1:]))
+            chase = breakout - snapshot.price
+            if not crossed or snapshot.price > breakout:
+                violations.append("completed bars do not confirm a downside breakout")
+        chase_limit = breakout * settings.vision_pattern_max_chase_pct
+        if chase < -1e-9 or chase > chase_limit + 1e-9:
+            violations.append(
+                f"price is {chase:+.2f} from breakout; exceeds no-chase band"
+            )
+
+    if violations:
+        return (
+            Decision(
+                action="wait",
+                confidence="low",
+                reasoning="vision pattern rejected: " + "; ".join(violations),
+            ),
+            None,
+            violations,
+        )
+
+    assert breakout is not None  # established above
+    buffer = settings.stop_buffer_cents / 100
+    if settings.stop_atr_multiplier is not None and snapshot.atr is not None:
+        buffer = min(
+            settings.stop_max_cents / 100,
+            max(settings.stop_min_cents / 100, snapshot.atr * settings.stop_atr_multiplier),
+        )
+    stop = breakout - buffer if direction == "call" else breakout + buffer
+    confidence = "high" if analysis.confidence >= 0.9 else "medium"
+    decision = Decision(
+        action=analysis.action,
+        level_price=round(breakout, 2),
+        stop_price=round(stop, 2),
+        confidence=confidence,
+        reasoning=f"vision {analysis.pattern}: {analysis.reasoning}",
+    )
+    level = Level(
+        price=round(breakout, 2),
+        kind="support" if direction == "call" else "resistance",
+        label=f"vision_{analysis.pattern}",
+    )
+    speed_window = min(settings.speed_window_bars, len(bars) - 1)
+    speed = bars[-1].close - bars[-1 - speed_window].close if speed_window else 0.0
+    candidate = SetupCandidate(
+        direction=direction,
+        level=level,
+        distance=snapshot.price - level.price,
+        speed=speed,
+        note=f"confirmed {analysis.pattern} at {level.price:.2f}",
+        regime=snapshot.regime,
+        quality_score=round(analysis.confidence * 5, 2),
+        ranking_score=round(analysis.confidence * 5, 2),
+    )
+    return decision, candidate, []

@@ -12,8 +12,11 @@ import pytest
 from tajator.broker.stub import StubBroker
 from tajator.config import Settings
 from tajator.graph.nodes import RuntimeContext
+from tajator.graph.nodes import make_nodes
 from tajator.journal import Journal
 from tajator.runner import TradingSession
+from tajator.market.indicators import build_snapshot
+from tajator.models import VisionPatternAnalysis
 
 ET = ZoneInfo("America/New_York")
 CSV = Path(__file__).parent / "data" / "spy_sample_day.csv"
@@ -91,6 +94,53 @@ def test_kill_switch_blocks_all_entries(session):
     sess.ctx.settings.kill_switch_file.write_text("stop")
     sess.run_replay(broker)
     assert broker.fills == [], "kill switch must prevent every entry"
+
+
+def test_vision_mode_creates_only_a_validated_synthetic_candidate(tmp_path):
+    bars = walk(ts(9, 30), [99.5] * 58 + [99.8, 100.0, 100.2])
+    broker = StubBroker(bars, prev_day_high=105.0, prev_day_low=95.0)
+    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
+
+    class VisionLLM:
+        def invoke(self, messages):
+            return VisionPatternAnalysis(
+                action="enter_call",
+                pattern="double_bottom",
+                status="confirmed",
+                confidence=0.88,
+                breakout_price=100.0,
+                invalidation_price=99.5,
+                evidence=["two lows", "close above neckline"],
+                reasoning="confirmed neckline break",
+            )
+
+    ctx = RuntimeContext(
+        settings=settings,
+        broker=broker,
+        journal=Journal(tmp_path),
+        symbol="AAPL",
+        use_llm=True,
+        vision_patterns=True,
+        _vision_llm=VisionLLM(),
+    )
+    nodes = make_nodes(ctx)
+    state = {
+        "bars": bars,
+        "snapshot": build_snapshot("AAPL", bars),
+        "levels": [],
+        "trades_today": 0,
+        "cooldown_levels": [],
+    }
+
+    setup = nodes["detect_setups"](state)
+    assert setup["vision_scan_due"] is True
+    decision = nodes["llm_decide"]({**state, **setup})
+
+    assert decision["decision"].action == "enter_call"
+    assert decision["candidates"][0].level.label == "vision_double_bottom"
+    content = next(tmp_path.glob("journal-*.jsonl")).read_text()
+    assert '"vision_pattern_analysis"' in content
+    assert '"sha256"' in content
 
 
 def test_two_symbol_sessions_keep_independent_state(tmp_path):

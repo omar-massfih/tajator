@@ -80,6 +80,11 @@ class Settings(BaseSettings):
 
     # LLM
     llm_model: str = "openai:gpt-5.1"
+    vision_pattern_min_bars: int = 60
+    vision_pattern_lookback_bars: int = 120
+    vision_pattern_scan_interval_bars: int = 5
+    vision_pattern_min_confidence: float = 0.80
+    vision_pattern_max_chase_pct: float = 0.002
 
     # Interactive Brokers
     ib_host: str = "127.0.0.1"
@@ -246,6 +251,18 @@ class Settings(BaseSettings):
             raise ValueError("ATR_WINDOW_BARS must be at least 2")
         if self.reaction_lookback_bars < 2:
             raise ValueError("REACTION_LOOKBACK_BARS must be at least 2")
+        if self.vision_pattern_min_bars < 10:
+            raise ValueError("VISION_PATTERN_MIN_BARS must be at least 10")
+        if self.vision_pattern_lookback_bars < self.vision_pattern_min_bars:
+            raise ValueError(
+                "VISION_PATTERN_LOOKBACK_BARS must be at least VISION_PATTERN_MIN_BARS"
+            )
+        if self.vision_pattern_scan_interval_bars < 1:
+            raise ValueError("VISION_PATTERN_SCAN_INTERVAL_BARS must be positive")
+        if not 0 <= self.vision_pattern_min_confidence <= 1:
+            raise ValueError("VISION_PATTERN_MIN_CONFIDENCE must be between 0 and 1")
+        if self.vision_pattern_max_chase_pct <= 0:
+            raise ValueError("VISION_PATTERN_MAX_CHASE_PCT must be positive")
         if not 0 <= self.long_wick_min_frac <= 1:
             raise ValueError("LONG_WICK_MIN_FRAC must be between 0 and 1")
         for name in (
