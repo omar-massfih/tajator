@@ -86,3 +86,16 @@ def test_strategy_compare_forwards_locked_report_paths(monkeypatch, tmp_path):
     assert seen[0].min_trades == 250
     assert seen[0].only_change == ["max_entry_to_stop_cents"]
     assert seen[0].output == tmp_path / "comparison.json"
+
+
+def test_forward_init_forwards_manifest_identity_without_tws(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_forward_init", lambda args: seen.append(args))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["tajator", "forward-init", "--name", "aapl-panel-v4", "--symbol", "AAPL"],
+    )
+    cli.main()
+    assert seen[0].name == "aapl-panel-v4"
+    assert seen[0].symbol == "AAPL"

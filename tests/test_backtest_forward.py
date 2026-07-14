@@ -5,7 +5,12 @@ import pytest
 from conftest import walk
 
 from tajator.backtest.data import ET
-from tajator.backtest.forward import capture_forward_day, latest_completed_session, session_quality
+from tajator.backtest.forward import (
+    capture_forward_day,
+    initialize_forward_cohort,
+    latest_completed_session,
+    session_quality,
+)
 from tajator.backtest.ledger import BacktestReport
 from tajator.broker.base import ChainParams
 from tajator.config import Settings
@@ -80,6 +85,10 @@ def test_forward_capture_locks_definition_and_builds_cumulative(tmp_path, monkey
     assert record.exists()
     payload = json.loads(cumulative.read_text())
     assert payload["metadata"]["validation_protocol"]["kind"] == "frozen_forward"
+    assert payload["metadata"]["validation_protocol"]["registration_mode"] == (
+        "at_first_capture"
+    )
+    assert payload["metadata"]["validation_protocol"]["eligible_from"] == DAY.isoformat()
     assert payload["metadata"]["data_coverage"]["days_with_underlying_bars"] == 1
     assert payload["metadata"]["option_chain_snapshots"][DAY.isoformat()]["source"] == (
         "captured_tws_snapshot"
@@ -92,6 +101,55 @@ def test_forward_capture_locks_definition_and_builds_cumulative(tmp_path, monkey
     assert day_record["report"]["daily_pnl"] == {DAY.isoformat(): 12.5}
     manifest = json.loads((tmp_path / "logs" / "forward" / "aapl-v1" / "manifest.json").read_text())
     assert manifest["captured_days"] == [DAY.isoformat()]
+
+
+def test_forward_init_locks_empty_cohort_before_first_capture(tmp_path):
+    settings = Settings(_env_file=None, log_dir=tmp_path / "logs")
+
+    path = initialize_forward_cohort(
+        name="AAPL corrected v1", symbol="aapl", settings=settings,
+    )
+    first = json.loads(path.read_text())
+    second_path = initialize_forward_cohort(
+        name="AAPL corrected v1", symbol="AAPL", settings=settings,
+    )
+    second = json.loads(second_path.read_text())
+
+    assert second_path == path
+    assert first == second
+    assert first["symbol"] == "AAPL"
+    assert first["captured_days"] == []
+    assert first["registration_mode"] == "pre_session"
+    assert date.fromisoformat(first["eligible_from"]) > datetime.now(ET).date()
+    assert first["definition"]["source_fingerprint"]
+    assert not (path.parent / "cumulative.json").exists()
+
+
+def test_forward_init_refuses_reusing_name_after_strategy_change(tmp_path):
+    settings = Settings(_env_file=None, log_dir=tmp_path / "logs")
+    initialize_forward_cohort(name="locked", symbol="AAPL", settings=settings)
+
+    changed = settings.model_copy(update={"stop_buffer_cents": 55})
+    with pytest.raises(ValueError, match="Use a new cohort name"):
+        initialize_forward_cohort(name="locked", symbol="AAPL", settings=changed)
+
+
+def test_preinitialized_cohort_refuses_retroactive_day(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, log_dir=tmp_path / "logs")
+    initialize_forward_cohort(
+        name="prospective", symbol="AAPL", settings=settings,
+        eligible_from=DAY.replace(day=3),
+    )
+    monkeypatch.setattr(
+        "tajator.backtest.forward.run_backtest",
+        lambda *args, **kwargs: _fake_report(settings),
+    )
+
+    with pytest.raises(ValueError, match="refusing retroactive capture"):
+        capture_forward_day(
+            name="prospective", symbol="AAPL", day=DAY, settings=settings,
+            ib=FakeIB(), cache_dir=tmp_path / "cache",
+        )
 
 
 def test_forward_capture_refuses_changed_strategy_in_same_cohort(tmp_path, monkeypatch):

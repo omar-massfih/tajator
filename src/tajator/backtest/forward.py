@@ -180,6 +180,8 @@ def _build_cumulative(cohort_dir: Path, manifest: dict) -> dict:
             "validation_protocol": {
                 "kind": "frozen_forward",
                 "created_at": manifest["created_at"],
+                "eligible_from": manifest.get("eligible_from"),
+                "registration_mode": manifest.get("registration_mode", "legacy"),
                 "captured_days": manifest["captured_days"],
                 "rules": "one immutable definition per cohort; completed sessions only",
             },
@@ -187,6 +189,55 @@ def _build_cumulative(cohort_dir: Path, manifest: dict) -> dict:
             "underlying_session_quality": session_quality_by_day,
         },
     }
+
+
+def initialize_forward_cohort(
+    *,
+    name: str,
+    symbol: str,
+    settings: Settings,
+    eligible_from: date | None = None,
+) -> Path:
+    """Lock a prospective cohort before its first observable session.
+
+    Initialization is deliberately local and idempotent: it records the exact
+    executable/configuration fingerprint without connecting to TWS or opening
+    any historical day. Later captures must match this manifest.
+    """
+    symbol = symbol.upper()
+    safe_name = _safe_experiment(name)
+    manifest_path = settings.log_dir / "forward" / safe_name / "manifest.json"
+    definition = _definition(symbol, settings)
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("symbol") != symbol:
+            raise ValueError(
+                f"cohort {safe_name!r} is locked to {manifest.get('symbol')}, not {symbol}"
+            )
+        previous = (manifest.get("definition") or {}).get("fingerprint")
+        if previous != definition["fingerprint"]:
+            raise ValueError(
+                f"cohort {safe_name!r} is frozen at {previous}; current definition is "
+                f"{definition['fingerprint']}. Use a new cohort name instead of mixing rules."
+            )
+        return manifest_path
+
+    created_at = datetime.now(timezone.utc)
+    registration_mode = "pre_session" if eligible_from is None else "at_first_capture"
+    eligible_from = eligible_from or (created_at.astimezone(ET).date() + timedelta(days=1))
+    _write_json(
+        manifest_path,
+        {
+            "name": safe_name,
+            "symbol": symbol,
+            "created_at": created_at.isoformat(),
+            "eligible_from": eligible_from.isoformat(),
+            "registration_mode": registration_mode,
+            "definition": definition,
+            "captured_days": [],
+        },
+    )
+    return manifest_path
 
 
 def capture_forward_day(
@@ -206,29 +257,16 @@ def capture_forward_day(
     cohort_dir = settings.log_dir / "forward" / safe_name
     manifest_path = cohort_dir / "manifest.json"
     cumulative_path = cohort_dir / "cumulative.json"
-    definition = _definition(symbol, settings)
-
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-        if manifest.get("symbol") != symbol:
-            raise ValueError(
-                f"cohort {safe_name!r} is locked to {manifest.get('symbol')}, not {symbol}"
-            )
-        previous = (manifest.get("definition") or {}).get("fingerprint")
-        if previous != definition["fingerprint"]:
-            raise ValueError(
-                f"cohort {safe_name!r} is frozen at {previous}; current definition is "
-                f"{definition['fingerprint']}. Use a new cohort name instead of mixing rules."
-            )
-    else:
-        manifest = {
-            "name": safe_name,
-            "symbol": symbol,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "definition": definition,
-            "captured_days": [],
-        }
-        _write_json(manifest_path, manifest)
+    initialize_forward_cohort(
+        name=safe_name, symbol=symbol, settings=settings, eligible_from=day,
+    )
+    manifest = json.loads(manifest_path.read_text())
+    eligible_from = manifest.get("eligible_from")
+    if eligible_from and day < date.fromisoformat(eligible_from):
+        raise ValueError(
+            f"cohort {safe_name!r} accepts sessions from {eligible_from}; "
+            f"refusing retroactive capture of {day}"
+        )
 
     fresh_bars = ensure_underlying_bars(ib, symbol, day, cache_dir, refresh=True)
     quality = session_quality(fresh_bars, day)

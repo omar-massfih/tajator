@@ -146,6 +146,13 @@ def main() -> None:
     )
     audit.add_argument("--min-trades", type=int, default=50)
 
+    forward_init = sub.add_parser(
+        "forward-init",
+        help="lock a prospective cohort definition before its first captured session",
+    )
+    forward_init.add_argument("--name", required=True, help="immutable cohort name")
+    forward_init.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
+
     forward = sub.add_parser(
         "forward-validate",
         help="capture one completed TWS session into a frozen options-validation cohort",
@@ -258,6 +265,8 @@ def main() -> None:
         cmd_strategy_compare(args)
     elif args.command == "edge-audit":
         cmd_edge_audit(args)
+    elif args.command == "forward-init":
+        cmd_forward_init(args)
     elif args.command == "forward-validate":
         cmd_forward_validate(args)
     elif args.command == "forward-latest":
@@ -728,6 +737,31 @@ def cmd_forward_validate(args) -> None:
         ib.disconnect()
     print(f"captured {symbol} {day}: {record}")
     print(f"cumulative validation report: {cumulative}")
+
+
+def cmd_forward_init(args) -> None:
+    from .backtest.forward import initialize_forward_cohort
+
+    settings = load_settings()
+    symbol = (args.symbol or settings.symbols[0]).upper()
+    try:
+        manifest_path = initialize_forward_cohort(
+            name=args.name, symbol=symbol, settings=settings,
+        )
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"forward initialization failed: {exc}")
+    definition = manifest["definition"]
+    print(
+        f"locked prospective cohort {manifest['name']} for {symbol}: "
+        f"config {definition['fingerprint']}, source {definition['source_fingerprint']}"
+    )
+    print(
+        f"created at: {manifest['created_at']}  "
+        f"eligible from: {manifest.get('eligible_from', 'legacy/unrestricted')}  "
+        f"captured days: {len(manifest['captured_days'])}"
+    )
+    print(f"manifest: {manifest_path}")
 
 
 def cmd_forward_latest(args) -> None:
