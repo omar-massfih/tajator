@@ -28,6 +28,12 @@ resistance, or vice versa) stay chart context instead of trades
 - **The LLM** (via `init_chat_model`, so any provider works) makes only the judgment
   calls: take this setup or wait; scale this piece now or hold one more bar. It returns
   a structured `Decision` and its reasoning is journaled verbatim.
+- **Vision-pattern mode** is a separate, opt-in paper policy. Every five completed
+  bars it renders the latest 120 one-minute OHLCV bars as a PNG and asks a multimodal
+  model to classify only double tops/bottoms, head-and-shoulders variants, or confirmed
+  triangle breakouts. Code independently checks direction, confidence, a recent
+  completed-bar breakout, visible levels, and the no-chase band before creating a
+  normal setup candidate.
 - **Hard guardrails** veto anything else: market hours, max 2 trades/day, one position
   at a time, stop required on the correct side (20–60 cents), the LLM cannot invent
   trades the detector didn't flag, premium budget caps, and a kill-switch file.
@@ -78,7 +84,10 @@ uv run tajator test-order --with-stop   # + place/verify/cancel a protective sto
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
     --prev-high 503.5 --prev-low 497.0   # bundled synthetic day, no IB/LLM needed
 uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay with the LLM
+uv run tajator replay --date 2026-07-02 --vision-patterns  # TWS bars → chart-image policy
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 --no-llm
+uv run tajator backtest --symbol AAPL --start 2026-06-01 --end 2026-06-30 \
+    --vision-patterns --underlying-only --experiment aapl-vision-v1
 uv run tajator backtest --symbol AAPL --start 2026-07-14 --end 2026-07-14 \
     --no-llm --tws-chain-snapshot --experiment exact-current-day  # completed day only
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
@@ -97,6 +106,7 @@ uv run tajator forward-validate --name aapl-rejection-v1 --symbol AAPL \
 uv run tajator forward-latest --name msft-panel-v2 --symbol MSFT  # preferred daily capture
 uv run tajator run          # deterministic live minute loop (paper by default)
 uv run tajator run --llm    # explicitly opt into experimental LLM decisions
+uv run tajator run --vision-patterns  # experimental multimodal policy; paper mode only
 uv run tajator shadow --symbol MSFT  # live TWS quotes, deterministic simulated fills, NO orders
 uv run tajator shadow-report logs/shadow --symbol MSFT
 uv run tajator edge-audit logs/shadow/MSFT_shadow_report.json --validation-only
@@ -295,6 +305,25 @@ the frozen forward cohorts by default. `run --deterministic` remains an accepted
 explicit compatibility flag. LLM decisions require `run --llm`; treat that as a
 separate experimental policy and never combine its fills with deterministic
 validation samples.
+
+`run --vision-patterns` is another separate policy and is hard-blocked when
+`TRADING_MODE=live`. It requires an image-capable API model such as
+`openai:gpt-5.1`; the Codex CLI backend does not accept the inline chart image.
+The image is generated from TWS stock bars in memory and only its SHA-256,
+dimensions, bar count, structured classification, and validation outcome are
+journaled. The PNG itself is not persisted. Scans default to once per five
+completed bars after at least 60 bars are available, so a long historical
+backtest can make many billable, nondeterministic model calls. Use a short
+development range first, then freeze settings and evaluate an untouched AAPL
+holdout; never mix its evidence with deterministic cohorts.
+
+The pattern catalog is evidence-informed, not a claim that chart shapes are an
+edge. Lo, Mamaysky, and Wang found that some objectively defined patterns added
+information in a long U.S. stock sample, while other work found no significantly
+positive head-and-shoulders returns in a different market. That mixed record is
+why this mode requires confirmation and must earn its own prospective result:
+[NBER Working Paper 7613](https://www.nber.org/papers/w7613) and
+[Lucke (2003)](https://doi.org/10.1080/00036840210150884).
 
 Use `shadow` to collect execution evidence without authorizing even paper
 orders. It runs that same deterministic graph on live TWS stock bars and option

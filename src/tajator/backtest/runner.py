@@ -243,6 +243,9 @@ def _strategy_config(settings: Settings) -> dict:
         "entry_confirmation", "max_entry_to_stop_cents", "no_new_entries_before",
         "opening_confirmation_until", "stop_atr_multiplier", "atr_window_bars",
         "allowed_regimes", "blocked_direction_regimes", "min_level_quality_score",
+        "vision_pattern_min_bars", "vision_pattern_lookback_bars",
+        "vision_pattern_scan_interval_bars", "vision_pattern_min_confidence",
+        "vision_pattern_max_chase_pct",
         "stop_min_cents", "stop_max_cents", "stop_cooldown_minutes", "runner_stop",
     )
     return {name: getattr(settings, name) for name in names}
