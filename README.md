@@ -71,6 +71,7 @@ not for live timing).
 
 ```bash
 uv run tajator check-ib     # compare entry market-data latency on client 118 — places NO orders
+uv run tajator entry-data-report  # evaluate the frozen paired latency/validity gate
 uv run tajator test-order   # paper diagnostic: buy 1 lot, watch the fill timeline, sell it back
 uv run tajator test-order --with-stop   # + place/verify/cancel a protective stop mid-trade
 uv run tajator replay --csv tests/data/spy_sample_day.csv --no-llm \
@@ -143,7 +144,9 @@ carried directly into submission, avoiding a second 10+ second snapshot wait.
 before the production snapshot and persists paired no-order records under
 `logs/diagnostics/`. After-hours missing option bid/ask is reported but cannot
 qualify the stream candidate; production remains unchanged until the frozen
-multi-session latency and quote-validity gate passes.
+multi-session latency and quote-validity gate passes. `entry-data-report`
+excludes records outside 09:30-14:00 ET, requires paired records for both AAPL
+and MSFT, and applies fixed thresholds that are intentionally not CLI options.
 Orders remain DAY market orders. Risk-removing exits submit immediately and are
 never blocked or delayed by a missing or wide quote. Entries journal their
 accepted snapshot; every order journals its status timeline and fill latency. A
