@@ -209,6 +209,14 @@ def main() -> None:
     calibration.add_argument("--client-id", type=int, default=117)
     calibration.add_argument("--output", type=Path, default=None)
 
+    entry_data_report = sub.add_parser(
+        "entry-data-report",
+        help="audit paired no-order entry stream/snapshot latency evidence",
+    )
+    entry_data_report.add_argument("--path", type=Path, default=None)
+    entry_data_report.add_argument("--symbols", default="AAPL,MSFT")
+    entry_data_report.add_argument("--output", type=Path, default=None)
+
     shadow_report = sub.add_parser(
         "shadow-report",
         help="build an edge-auditable report from no-order shadow journals",
@@ -291,6 +299,8 @@ def main() -> None:
         cmd_option_panel_compare(args)
     elif args.command == "execution-calibrate":
         cmd_execution_calibrate(args)
+    elif args.command == "entry-data-report":
+        cmd_entry_data_report(args)
     elif args.command == "shadow-report":
         cmd_shadow_report(args)
     elif args.command == "historical-signal-tournament":
@@ -1035,6 +1045,23 @@ def cmd_shadow_report(args) -> None:
         sys.exit(f"shadow report failed: {exc}")
     print_shadow_report(report)
     print(f"shadow report: {output}")
+
+
+def cmd_entry_data_report(args) -> None:
+    from .backtest.audit import audit_entry_market_data, print_entry_market_data_audit
+
+    settings = load_settings()
+    path = args.path or settings.log_dir / "diagnostics"
+    symbols = tuple(symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip())
+    output = args.output or settings.log_dir / "research" / "entry-market-data-audit.json"
+    try:
+        result = audit_entry_market_data(path, symbols=symbols)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"entry data report failed: {exc}")
+    print_entry_market_data_audit(result)
+    print(f"entry market-data audit: {output}")
 
 
 def cmd_historical_signal_tournament(args) -> None:

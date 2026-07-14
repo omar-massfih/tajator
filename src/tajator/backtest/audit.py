@@ -14,12 +14,212 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
+from statistics import median
 
 from ..broker.backtest import BacktestBroker
 from ..broker.base import Fill
 from ..models import SelectedContract
 from .data import ET, ensure_option_bars
 from .ledger import BacktestReport, build_report
+
+
+ENTRY_STREAM_MIN_PAIRS = 5
+ENTRY_STREAM_MIN_SESSIONS = 2
+ENTRY_STREAM_MEDIAN_MAX_S = 2.0
+ENTRY_STREAM_SINGLE_MAX_S = 5.0
+ENTRY_STREAM_MIN_MEDIAN_IMPROVEMENT_S = 5.0
+
+
+def _entry_diagnostic_paths(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(path.glob("journal-*.jsonl"))
+    raise ValueError(f"entry diagnostic path does not exist: {path}")
+
+
+def audit_entry_market_data(path: Path, *, symbols: tuple[str, ...]) -> dict:
+    """Evaluate the frozen temporary-stream promotion gate from paired journals."""
+    expected_symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol))
+    if not expected_symbols:
+        raise ValueError("at least one entry diagnostic symbol is required")
+    paths = _entry_diagnostic_paths(path)
+    if not paths:
+        raise ValueError(f"no journal-*.jsonl files found in {path}")
+
+    diagnostic_records = []
+    excluded_records = 0
+    pairs: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+    for journal_path in paths:
+        for line_number, line in enumerate(journal_path.read_text().splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON in {journal_path}:{line_number}: {exc}") from exc
+            if event.get("type") != "entry_market_data_diagnostic":
+                continue
+            diagnostic_records.append(event)
+            if event.get("no_order_placed") is not True:
+                raise ValueError(
+                    f"entry diagnostic in {journal_path}:{line_number} lacks "
+                    "no_order_placed=true"
+                )
+            if event.get("regular_entry_window") is not True:
+                excluded_records += 1
+                continue
+            symbol = str(event.get("symbol") or "").upper()
+            if symbol not in expected_symbols:
+                continue
+            diagnostic_id = str(event.get("diagnostic_id") or "")
+            if not diagnostic_id:
+                raise ValueError(
+                    f"eligible entry diagnostic in {journal_path}:{line_number} has no pair ID"
+                )
+            method = str(event.get("method") or "")
+            if method not in {"temporary_streams", "production_snapshot"}:
+                raise ValueError(
+                    f"eligible entry diagnostic in {journal_path}:{line_number} "
+                    f"has unknown method {method!r}"
+                )
+            key = (symbol, diagnostic_id)
+            if method in pairs[key]:
+                raise ValueError(
+                    f"duplicate {method} record for {symbol} diagnostic {diagnostic_id}"
+                )
+            pairs[key][method] = event
+
+    by_symbol: dict[str, dict] = {}
+    for symbol in expected_symbols:
+        symbol_groups = [group for (found, _), group in pairs.items() if found == symbol]
+        paired = [
+            group for group in symbol_groups
+            if {"temporary_streams", "production_snapshot"} <= set(group)
+        ]
+        unpaired = len(symbol_groups) - len(paired)
+        sessions = {
+            datetime.fromisoformat(group["temporary_streams"]["ts"]).astimezone(ET).date()
+            for group in paired
+        }
+        stream_records = [group["temporary_streams"] for group in paired]
+        production_records = [group["production_snapshot"] for group in paired]
+        stream_latencies = [float(record["elapsed_seconds"]) for record in stream_records]
+        production_latencies = [
+            float(record["elapsed_seconds"]) for record in production_records
+        ]
+        stream_median = median(stream_latencies) if stream_latencies else None
+        production_median = median(production_latencies) if production_latencies else None
+        stream_max = max(stream_latencies) if stream_latencies else None
+        median_improvement = (
+            production_median - stream_median
+            if stream_median is not None and production_median is not None else None
+        )
+        complete_streams = sum(
+            record.get("complete_bid_ask") is True
+            and float(record.get("underlying_price") or 0) > 0
+            and not record.get("error")
+            for record in stream_records
+        )
+        cleanup_failures = sum(
+            "cleanup failed" in str(record.get("error") or "").lower()
+            for record in stream_records
+        )
+        quote_guard_regressions = sum(
+            stream.get("liquidity_reason") is not None
+            and production.get("complete_bid_ask") is True
+            and float(production.get("underlying_price") or 0) > 0
+            and not production.get("error")
+            and production.get("liquidity_reason") is None
+            for stream, production in zip(stream_records, production_records, strict=True)
+        )
+        gates = {
+            "minimum_paired_checks": len(paired) >= ENTRY_STREAM_MIN_PAIRS,
+            "minimum_regular_sessions": len(sessions) >= ENTRY_STREAM_MIN_SESSIONS,
+            "all_checks_paired": unpaired == 0,
+            "all_stream_quotes_complete": (
+                bool(stream_records) and complete_streams == len(stream_records)
+            ),
+            "no_stream_cleanup_failures": cleanup_failures == 0,
+            "stream_median_below_2s": (
+                stream_median is not None and stream_median < ENTRY_STREAM_MEDIAN_MAX_S
+            ),
+            "stream_max_below_5s": (
+                stream_max is not None and stream_max < ENTRY_STREAM_SINGLE_MAX_S
+            ),
+            "median_improvement_at_least_5s": (
+                median_improvement is not None
+                and median_improvement >= ENTRY_STREAM_MIN_MEDIAN_IMPROVEMENT_S
+            ),
+            "no_quote_guard_regressions": quote_guard_regressions == 0,
+        }
+        by_symbol[symbol] = {
+            "paired_checks": len(paired),
+            "regular_sessions": len(sessions),
+            "unpaired_checks": unpaired,
+            "complete_stream_checks": complete_streams,
+            "stream_cleanup_failures": cleanup_failures,
+            "quote_guard_regressions": quote_guard_regressions,
+            "stream_median_seconds": (
+                round(stream_median, 4) if stream_median is not None else None
+            ),
+            "stream_max_seconds": round(stream_max, 4) if stream_max is not None else None,
+            "production_median_seconds": (
+                round(production_median, 4) if production_median is not None else None
+            ),
+            "median_improvement_seconds": (
+                round(median_improvement, 4) if median_improvement is not None else None
+            ),
+            "gates": gates,
+            "supported": all(gates.values()),
+        }
+
+    supported = all(row["supported"] for row in by_symbol.values())
+    sample_complete = all(
+        row["gates"]["minimum_paired_checks"]
+        and row["gates"]["minimum_regular_sessions"]
+        for row in by_symbol.values()
+    )
+    return {
+        "verdict": (
+            "candidate_supported" if supported else
+            "candidate_not_supported" if sample_complete else
+            "insufficient_regular_session_evidence"
+        ),
+        "production_changed": False,
+        "symbols": by_symbol,
+        "diagnostic_records": len(diagnostic_records),
+        "excluded_outside_entry_window": excluded_records,
+        "thresholds": {
+            "minimum_paired_checks_per_symbol": ENTRY_STREAM_MIN_PAIRS,
+            "minimum_regular_sessions_per_symbol": ENTRY_STREAM_MIN_SESSIONS,
+            "stream_median_max_seconds": ENTRY_STREAM_MEDIAN_MAX_S,
+            "stream_single_max_seconds": ENTRY_STREAM_SINGLE_MAX_S,
+            "minimum_median_improvement_seconds": ENTRY_STREAM_MIN_MEDIAN_IMPROVEMENT_S,
+        },
+    }
+
+
+def print_entry_market_data_audit(result: dict) -> None:
+    def seconds(value) -> str:
+        return "-" if value is None else f"{value:.2f}s"
+
+    print("\n--- paired entry market-data audit ---")
+    print(f"verdict: {result['verdict']}  production changed: NO")
+    print(
+        f"records: {result['diagnostic_records']}  "
+        f"excluded outside entry window: {result['excluded_outside_entry_window']}"
+    )
+    for symbol, row in result["symbols"].items():
+        print(
+            f"{symbol}: {row['paired_checks']} pairs / {row['regular_sessions']} sessions; "
+            f"stream median {seconds(row['stream_median_seconds'])}, "
+            f"max {seconds(row['stream_max_seconds'])}; "
+            f"production median {seconds(row['production_median_seconds'])}; "
+            f"improvement {seconds(row['median_improvement_seconds'])}"
+        )
+        for name, passed in row["gates"].items():
+            print(f"  {'PASS' if passed else 'FAIL'}  {name.replace('_', ' ')}")
 
 
 def _shadow_journal_paths(path: Path) -> list[Path]:

@@ -95,6 +95,25 @@ def test_strategy_compare_forwards_locked_report_paths(monkeypatch, tmp_path):
     assert seen[0].output == tmp_path / "comparison.json"
 
 
+def test_entry_data_report_forwards_fixed_evidence_scope(monkeypatch, tmp_path):
+    seen = []
+    journal = tmp_path / "diagnostics"
+    output = tmp_path / "audit.json"
+    monkeypatch.setattr(cli, "cmd_entry_data_report", lambda args: seen.append(args))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tajator", "entry-data-report", "--path", str(journal),
+            "--symbols", "AAPL,MSFT", "--output", str(output),
+        ],
+    )
+    cli.main()
+    assert seen[0].path == journal
+    assert seen[0].symbols == "AAPL,MSFT"
+    assert seen[0].output == output
+
+
 def test_forward_init_forwards_manifest_identity_without_tws(monkeypatch):
     seen = []
     monkeypatch.setattr(cli, "cmd_forward_init", lambda args: seen.append(args))
