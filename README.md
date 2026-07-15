@@ -164,8 +164,9 @@ cannot bypass the audit's independent two-session requirement.
 Orders remain DAY market orders. Risk-removing exits submit immediately and are
 never blocked or delayed by a missing or wide quote. Entries journal their
 accepted snapshot; every order journals its status timeline and fill latency. A
-slow, slipped, or over-budget confirmed fill is adopted and managed but
-activates the kill switch against new entries.
+slow, slipped, or over-budget confirmed fill is adopted and managed but halts
+new entries inside the running process without creating the operator-owned
+`KILL` file.
 
 With `PROTECTIVE_STOP=true`, every entry also rests a GTC market sell at IB,
 triggered by the *underlying* crossing the plan's stop price. The in-loop mental
@@ -392,16 +393,18 @@ improvement without a new, independently declared hypothesis and holdout.
 - Paper by default. Going live requires changing **both** `TRADING_MODE=live` and
   `IB_PORT` to a live port (4001 for IB Gateway, 7496 for TWS) — one without the
   other refuses to start; paper mode refuses to connect to any live port.
-- Kill switch: `touch KILL` in the repo root blocks all new entries immediately
-  (existing positions are still managed and can exit).
+- Operator-owned kill switch: `touch KILL` in the repo root blocks all new
+  entries immediately (existing positions are still managed and can exit).
+  Tajator reads this file but never creates it.
 - `run` refuses to start if the IB account already holds option positions in a
   configured symbol — the agent only manages positions it opened itself (it
   knows their plan and stop); flatten strays manually first.
 - If the IB connection drops (e.g. the Gateway's nightly restart), the loop
   reconnects automatically on the next minute tick and journals the outage.
-- A partially filled order that had to be cancelled activates the kill switch
-  automatically: untracked contracts at IB mean no new entries until the
-  operator reconciles and deletes the KILL file.
+- A partial, unconfirmed, or execution-quality-breaching order halts new entries
+  inside the running process and notifies the operator. It does not create
+  `KILL`; reconcile IB before restarting, and add `KILL` yourself when a
+  persistent operator-controlled halt is wanted.
 - Ctrl-C during `run` offers to flatten any open position.
 - Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`: snapshots, candidates,
   every LLM decision + reasoning, risk vetoes, fills, quote preflights, order

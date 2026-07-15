@@ -57,6 +57,7 @@ class IBBroker(Broker):
         self._daily_bars_cache: dict[str, tuple[str, list[Bar]]] = {}
         self._qualified: dict[str, Option] = {}
         self._delayed = False
+        self._entry_halt_reason: str | None = None
         # subscribe before connect() so connect-time errors are seen too
         self.ib.errorEvent += self._on_error
         # always-on order diagnostics — the 07-08 incident was undiagnosable
@@ -70,6 +71,10 @@ class IBBroker(Broker):
     @property
     def uses_live_execution_guards(self) -> bool:
         return True
+
+    @property
+    def entry_halt_reason(self) -> str | None:
+        return self._entry_halt_reason
 
     def connect(self) -> None:
         s = self.settings
@@ -448,6 +453,8 @@ class IBBroker(Broker):
         underlying_submit: float | None = None,
         snapshot_supplied: bool = False,
     ) -> Fill:
+        if side == "BUY" and self._entry_halt_reason is not None:
+            raise RuntimeError(f"new entries are halted for this process: {self._entry_halt_reason}")
         opt = self._option(contract)
         qty_before = self._snapshot_position(opt)
         if not snapshot_supplied and side == "BUY":
@@ -805,14 +812,19 @@ class IBBroker(Broker):
         return total, (cost / total if total else None)
 
     def _halt_new_entries(self, reason: str) -> None:
-        log.error("%s — activating kill switch %s", reason, self.settings.kill_switch_file)
-        text = (
-            f"{reason} at {self.now().isoformat()}\n"
-            "Reconcile the position in IB Gateway, then delete this file to resume entries.\n"
-        )
-        self.settings.kill_switch_file.write_text(text)
+        log.error("%s — halting new entries for this process", reason)
+        self._entry_halt_reason = self._entry_halt_reason or reason
+        if self.journal is not None:
+            self.journal.write(
+                "entry_halted",
+                reason=reason,
+                scope="current_process",
+                kill_switch_written=False,
+            )
         self.notifier.notify_status(
-            f"tajator KILL switch activated at {self.settings.kill_switch_file}:\n{text.strip()}"
+            "tajator halted new entries for the current process:\n"
+            f"{reason}\nReconcile the account in IB Gateway. The KILL file was not modified; "
+            "only the operator may create it."
         )
 
 

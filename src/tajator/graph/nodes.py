@@ -240,6 +240,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
                 trades_today=state.get("trades_today", 0),
                 settings=settings,
                 delayed_data=ctx.broker.is_delayed_data,
+                internal_halt_reason=ctx.broker.entry_halt_reason,
             )
             if blockers:
                 ctx.metrics["entry_blocker"] = ctx.metrics.get("entry_blocker", 0) + 1
@@ -342,6 +343,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             trades_today=state.get("trades_today", 0),
             settings=settings,
             delayed_data=ctx.broker.is_delayed_data,
+            internal_halt_reason=ctx.broker.entry_halt_reason,
         )
         if blockers:
             ctx.metrics["entry_blocker"] = ctx.metrics.get("entry_blocker", 0) + 1
@@ -448,6 +450,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             trades_today=state.get("trades_today", 0),
             candidates=state["candidates"],
             settings=settings,
+            internal_halt_reason=ctx.broker.entry_halt_reason,
             delayed_data=ctx.broker.is_delayed_data,
             snapshot_price=state["snapshot"].price,
         )

@@ -154,6 +154,21 @@ def test_entry_blockers_clear_midday(settings):
     assert entry_blockers(now=MIDDAY, position=None, trades_today=0, settings=settings) == []
 
 
+def test_entry_blockers_honors_process_local_broker_halt_without_kill_file(settings):
+    blockers = entry_blockers(
+        now=MIDDAY,
+        position=None,
+        trades_today=0,
+        settings=settings,
+        internal_halt_reason="partial fill requires reconciliation",
+    )
+
+    assert blockers == [
+        "broker halted new entries for this process: partial fill requires reconciliation"
+    ]
+    assert not settings.kill_switch_file.exists()
+
+
 def test_entry_blockers_collects_cheap_vetoes(settings):
     settings.kill_switch_file.write_text("stop")
     blockers = entry_blockers(

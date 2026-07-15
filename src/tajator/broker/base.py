@@ -109,6 +109,11 @@ class Broker(ABC):
         """Whether entry sizing/preflight should require real-time bid/ask data."""
         return False
 
+    @property
+    def entry_halt_reason(self) -> str | None:
+        """Process-local reason that new entries are disabled, if any."""
+        return None
+
     def ensure_connected(self) -> bool:
         """Reconnect if the underlying session dropped. Returns True if a
         reconnect happened; no-op (False) for in-memory brokers."""

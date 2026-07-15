@@ -13,8 +13,9 @@ Residual gaps this cannot close (refusal correctly stands):
   no record exists;
 - an `entry_order_failed` whose reconciled partial fill left contracts in the
   account — no OpenPosition was ever built, so there is no plan to adopt.
-  Such events count only toward trades_today here; the broker layer already
-  writes the KILL file for them.
+  Such events count only toward trades_today here. The broker halts entries in
+  the running process and startup account reconciliation refuses unexplained
+  positions; only the operator may create the KILL file.
 """
 
 from __future__ import annotations

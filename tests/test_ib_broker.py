@@ -23,12 +23,11 @@ def settings(tmp_path):
     )
 
 
-def test_partial_fill_halt_activates_kill_switch(settings):
+def test_partial_fill_halt_is_internal_and_does_not_create_kill(settings):
     broker = IBBroker(settings)
     broker._halt_new_entries("partial fill: BUY 1/4 SPY 20260710 500C")
-    text = settings.kill_switch_file.read_text()
-    assert "partial fill" in text
-    assert "delete this file" in text
+    assert "partial fill" in broker.entry_halt_reason
+    assert not settings.kill_switch_file.exists()
 
 
 def test_partial_fill_halt_notifies(settings):
@@ -46,8 +45,9 @@ def test_partial_fill_halt_notifies(settings):
     broker = IBBroker(settings, notifier=notifier)
     broker._halt_new_entries("partial fill: BUY 1/4 SPY 20260710 500C")
     assert notifier.statuses
-    assert "KILL switch activated" in notifier.statuses[0]
+    assert "halted new entries" in notifier.statuses[0]
     assert "partial fill" in notifier.statuses[0]
+    assert "KILL file was not modified" in notifier.statuses[0]
 
 
 def test_open_option_positions_reports_configured_symbols_only(settings):
@@ -227,7 +227,7 @@ def test_partial_fill_returns_partial_and_halts(settings, monkeypatch):
     fill = place(settings, monkeypatch, trade, qty=4, fill_effect=2)
     assert fill.qty == 2
     assert fill.premium == pytest.approx(2.20)
-    assert settings.kill_switch_file.exists()
+    assert not settings.kill_switch_file.exists()
 
 
 def test_confirmed_zero_fill_raises_and_halts_buys(settings, monkeypatch):
@@ -235,7 +235,7 @@ def test_confirmed_zero_fill_raises_and_halts_buys(settings, monkeypatch):
         place(settings, monkeypatch, make_trade(), qty=2)
     assert exc_info.value.filled == 0
     assert exc_info.value.suspect is False
-    assert settings.kill_switch_file.exists(), "failing entry orders must halt new entries"
+    assert not settings.kill_switch_file.exists()
 
 
 def test_confirmed_zero_fill_sell_raises_without_halting(settings, monkeypatch):
@@ -263,7 +263,8 @@ def test_position_moved_without_execution_reports_is_suspect(settings, monkeypat
         place(settings, monkeypatch, make_trade(), qty=1, fill_effect=1)
     assert exc_info.value.suspect is True
     assert exc_info.value.filled == 1
-    assert "UNCONFIRMED" in settings.kill_switch_file.read_text()
+    assert "unconfirmed" in str(exc_info.value).lower()
+    assert not settings.kill_switch_file.exists()
 
 
 def test_full_fill_per_reports_with_positions_down_still_adopts(settings, monkeypatch):
@@ -272,7 +273,7 @@ def test_full_fill_per_reports_with_positions_down_still_adopts(settings, monkey
     trade = make_trade(fills=[(1, 3.10)])
     fill = place(settings, monkeypatch, trade, qty=1, positions_fail=True)
     assert fill.qty == 1
-    assert settings.kill_switch_file.exists()
+    assert not settings.kill_switch_file.exists()
 
 
 def test_clean_filled_path_untouched(settings, monkeypatch):
@@ -339,7 +340,8 @@ def test_slow_slipped_over_budget_fill_is_adopted_and_halts(settings, monkeypatc
     assert "latency" in fill.execution_quality.breaches[0]
     assert "slippage" in fill.execution_quality.breaches[1]
     assert "budget" in fill.execution_quality.breaches[2]
-    assert settings.kill_switch_file.exists()
+    assert broker.entry_halt_reason is not None
+    assert not settings.kill_switch_file.exists()
 
 
 def test_market_exit_proceeds_without_valid_quote(settings, monkeypatch):
@@ -451,7 +453,8 @@ def test_cancel_stop_position_mismatch_halts_and_raises(settings, monkeypatch):
     with pytest.raises(OrderFailed) as exc_info:
         broker.cancel_protective_stop(CONTRACT, make_stop(qty=2), expected_held=2)
     assert exc_info.value.suspect is True
-    assert settings.kill_switch_file.exists()
+    assert broker.entry_halt_reason is not None
+    assert not settings.kill_switch_file.exists()
 
 
 def test_cancel_stop_unconfirmed_terminal_state_halts_and_raises(settings, monkeypatch):
@@ -461,7 +464,8 @@ def test_cancel_stop_unconfirmed_terminal_state_halts_and_raises(settings, monke
     with pytest.raises(OrderFailed) as exc_info:
         broker.cancel_protective_stop(CONTRACT, make_stop(qty=2), expected_held=2)
     assert exc_info.value.suspect is True
-    assert settings.kill_switch_file.exists(), "an unconfirmed cancel must stop the session"
+    assert broker.entry_halt_reason is not None
+    assert not settings.kill_switch_file.exists()
 
 
 def test_poll_stop_working(settings, monkeypatch):

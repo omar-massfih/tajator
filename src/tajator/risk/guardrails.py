@@ -48,6 +48,7 @@ def entry_blockers(
     trades_today: int,
     settings: Settings,
     delayed_data: bool = False,
+    internal_halt_reason: str | None = None,
 ) -> list[str]:
     """Decision-independent entry vetoes — cheap enough to run before the LLM."""
     violations: list[str] = []
@@ -55,6 +56,8 @@ def entry_blockers(
 
     if settings.kill_switch_file.exists():
         violations.append("kill switch file present — no new entries")
+    if internal_halt_reason is not None:
+        violations.append(f"broker halted new entries for this process: {internal_halt_reason}")
     if delayed_data and settings.block_entries_on_delayed_data:
         violations.append(
             "market data is DELAYED (no live subscription) — the paper fill engine "
@@ -83,6 +86,7 @@ def check(
     candidates: list[SetupCandidate],
     settings: Settings,
     delayed_data: bool = False,
+    internal_halt_reason: str | None = None,
     snapshot_price: float | None = None,
 ) -> RiskVerdict:
     if decision.action in ("wait", "scale_out", "exit"):
@@ -90,7 +94,7 @@ def check(
 
     violations = entry_blockers(
         now=now, position=position, trades_today=trades_today, settings=settings,
-        delayed_data=delayed_data,
+        delayed_data=delayed_data, internal_halt_reason=internal_halt_reason,
     )
 
     direction = "call" if decision.action == "enter_call" else "put"
