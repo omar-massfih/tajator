@@ -35,12 +35,22 @@ def build_llm(model_string: str, output_model: type[BaseModel] = Decision):
     """`model_string` is an init_chat_model id like 'openai:gpt-5.1', or
     'codex' / 'codex:<model>' to use the Codex CLI (ChatGPT subscription)."""
     if model_string == "codex" or model_string.startswith("codex:"):
-        from .codex import BRIEFING_SCHEMA, DECISION_SCHEMA, CodexDecider
+        from .codex import (
+            BRIEFING_SCHEMA,
+            DECISION_SCHEMA,
+            VISION_PATTERN_SCHEMA,
+            CodexDecider,
+        )
 
-        if output_model not in (Decision, MorningBriefing):
-            raise ValueError("Codex CLI models do not support vision-pattern image input")
         _, _, model = model_string.partition(":")
-        schema = BRIEFING_SCHEMA if output_model is MorningBriefing else DECISION_SCHEMA
+        if output_model is MorningBriefing:
+            schema = BRIEFING_SCHEMA
+        elif output_model is VisionPatternAnalysis:
+            schema = VISION_PATTERN_SCHEMA
+        elif output_model is Decision:
+            schema = DECISION_SCHEMA
+        else:
+            raise ValueError(f"Codex CLI has no structured schema for {output_model.__name__}")
         return CodexDecider(model=model or None, output_model=output_model, schema=schema)
     llm = init_chat_model(model_string, timeout=LLM_TIMEOUT_S)
     return llm.with_structured_output(output_model)

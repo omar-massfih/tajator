@@ -96,9 +96,8 @@ def test_decide_vision_fails_closed(result):
     assert analysis.pattern == "none"
 
 
-def test_codex_cli_is_rejected_for_vision_input():
-    with pytest.raises(ValueError, match="do not support vision"):
-        build_vision_llm("codex")
+def test_codex_cli_supports_vision_input():
+    assert build_vision_llm("codex").output_model is VisionPatternAnalysis
 
 
 def _confirmed_call_analysis(**updates):

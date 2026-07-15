@@ -307,8 +307,9 @@ separate experimental policy and never combine its fills with deterministic
 validation samples.
 
 `run --vision-patterns` is another separate policy and is hard-blocked when
-`TRADING_MODE=live`. It requires an image-capable API model such as
-`openai:gpt-5.1`; the Codex CLI backend does not accept the inline chart image.
+`TRADING_MODE=live`. It works with an image-capable API model or the `codex`
+subscription backend; the latter writes the in-memory chart to its isolated
+temporary directory and attaches it with `codex exec --image`.
 The image is generated from TWS stock bars in memory and only its SHA-256,
 dimensions, bar count, structured classification, and validation outcome are
 journaled. The PNG itself is not persisted. Scans default to once per five

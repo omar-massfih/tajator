@@ -1,11 +1,20 @@
 import json
 import stat
+from pathlib import Path
 
 import pytest
 
-from tajator.llm.codex import BRIEFING_SCHEMA, CodexDecider, _extract_json
-from tajator.llm.decide import build_llm, decide_entry
-from tajator.models import MorningBriefing
+from tajator.llm.codex import (
+    BRIEFING_SCHEMA,
+    VISION_PATTERN_SCHEMA,
+    CodexDecider,
+    _extract_json,
+)
+from tajator.llm.decide import build_llm, build_vision_llm, decide_entry
+from tajator.llm.vision import render_bar_chart, vision_messages
+from tajator.models import MorningBriefing, VisionPatternAnalysis
+
+from conftest import ts, walk
 
 GOOD_JSON = json.dumps(
     {"action": "enter_call", "level_price": 499.0, "stop_price": 498.6,
@@ -101,3 +110,41 @@ def test_build_llm_routes_codex_briefing_output_model():
     decider = build_llm("codex", output_model=MorningBriefing)
     assert isinstance(decider, CodexDecider)
     assert decider.output_model is MorningBriefing
+
+
+def test_codex_decider_attaches_inline_chart_as_image(tmp_path):
+    answer = json.dumps({
+        "action": "wait", "pattern": "none", "status": "none", "confidence": 0.1,
+        "breakout_price": None, "invalidation_price": None, "evidence": [],
+        "reasoning": "no confirmed pattern",
+    })
+    argv_file = tmp_path / "argv.json"
+    binary = tmp_path / "codex"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        f"answer = {answer!r}\n"
+        "args = sys.argv[1:]\n"
+        "out = args[args.index('--output-last-message') + 1]\n"
+        "open(out, 'w').write(answer)\n"
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    chart = render_bar_chart("AAPL", walk(ts(9, 30), [100.0, 100.2, 100.1]))
+    decider = CodexDecider(
+        binary=str(binary), output_model=VisionPatternAnalysis,
+        schema=VISION_PATTERN_SCHEMA,
+    )
+
+    result = decider.invoke(vision_messages("classify", chart))
+
+    argv = json.loads(argv_file.read_text())
+    image_path = argv[argv.index("--image") + 1]
+    assert result.action == "wait"
+    assert Path(image_path).read_bytes() == chart.png
+
+
+def test_build_vision_llm_supports_codex_subscription():
+    decider = build_vision_llm("codex")
+    assert isinstance(decider, CodexDecider)
+    assert decider.output_model is VisionPatternAnalysis
