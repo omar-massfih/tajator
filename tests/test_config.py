@@ -9,6 +9,19 @@ def test_symbols_defaults_to_spy():
     assert settings.symbols == ["SPY"]
 
 
+def test_aapl_frozen_candidate_is_the_source_default():
+    settings = Settings(_env_file=None)
+
+    aapl = settings.for_symbol("AAPL")
+    assert aapl.entry_confirmation == "touch_rejection"
+    assert aapl.max_entry_to_stop_cents == 100
+    assert aapl.no_new_entries_after.hour == 14
+    assert aapl.blocked_direction_regimes == ["put:trend_up"]
+
+    # The candidate is symbol-specific; unrelated symbols retain global rules.
+    assert settings.for_symbol("MSFT") is settings
+
+
 def test_symbols_parses_comma_separated_env_string():
     settings = Settings(_env_file=None, symbols="SPY,AAPL,MSFT,NVDA")
     assert settings.symbols == ["SPY", "AAPL", "MSFT", "NVDA"]

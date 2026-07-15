@@ -306,6 +306,12 @@ explicit compatibility flag. LLM decisions require `run --llm`; treat that as a
 separate experimental policy and never combine its fills with deterministic
 validation samples.
 
+AAPL's source-level default is the frozen forward candidate: touch-rejection
+entries, at most $1.00 from entry to the stock stop, no entries after 14:00 ET,
+and no puts in a detected `trend_up` regime. The override is AAPL-specific;
+other symbols retain the global strategy unless `SYMBOL_STRATEGY_OVERRIDES`
+explicitly replaces the built-in map.
+
 `run --pattern-data` is another separate policy and is hard-blocked when
 `TRADING_MODE=live`. It works with the normal text model or the `codex`
 subscription backend. The prompt contains compact completed OHLCV rows and an

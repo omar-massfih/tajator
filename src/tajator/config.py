@@ -68,6 +68,18 @@ class SymbolStrategyOverride(BaseModel):
         return self
 
 
+def _default_symbol_strategy_overrides() -> dict[str, SymbolStrategyOverride]:
+    """Return the frozen AAPL candidate used by ordinary deterministic runs."""
+    return {
+        "AAPL": SymbolStrategyOverride(
+            entry_confirmation="touch_rejection",
+            max_entry_to_stop_cents=100,
+            no_new_entries_after=time(14, 0),
+            blocked_direction_regimes=["put:trend_up"],
+        )
+    }
+
+
 def _validate_direction_regimes(values: list[str]) -> None:
     valid = {f"{direction}:{regime}" for direction in ("call", "put") for regime in REGIMES}
     invalid = sorted(set(values) - valid)
@@ -154,7 +166,13 @@ class Settings(BaseSettings):
     allowed_regimes: list[str] = Field(default_factory=list)
     blocked_direction_regimes: list[str] = Field(default_factory=list)
     min_level_quality_score: float | None = None
-    symbol_strategy_overrides: dict[str, SymbolStrategyOverride] = Field(default_factory=dict)
+    # Frozen research candidate: AAPL waits for rejection confirmation, caps
+    # entry-to-stop distance at $1, stops entering at 14:00 ET, and avoids puts
+    # in an up-trend regime. An explicit SYMBOL_STRATEGY_OVERRIDES value still
+    # replaces this mapping, so deployments can deliberately choose otherwise.
+    symbol_strategy_overrides: dict[str, SymbolStrategyOverride] = Field(
+        default_factory=_default_symbol_strategy_overrides
+    )
 
     # Stop-distance rule (defaults live next to the gate in risk/guardrails.py)
     stop_min_cents: int = STOP_MIN_CENTS

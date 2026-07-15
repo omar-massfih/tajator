@@ -173,7 +173,14 @@ def test_compiled_graph_can_enter_call_from_validated_pattern_data(tmp_path):
 
 def test_two_symbol_sessions_keep_independent_state(tmp_path):
     """Two TradingSessions sharing one journal must not share position/trades_today."""
-    settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
+    settings = Settings(
+        _env_file=None,
+        kill_switch_file=tmp_path / "KILL",
+        log_dir=tmp_path,
+        # This fixture replays identical SPY-shaped bars for both symbols; the
+        # test concerns independent session state, not AAPL's strategy policy.
+        symbol_strategy_overrides={},
+    )
     journal = Journal(tmp_path)
 
     broker_spy = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
