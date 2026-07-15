@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 Direction = Literal["call", "put"]
 
-VisionPatternName = Literal[
+PatternName = Literal[
     "none",
     "double_top",
     "double_bottom",
@@ -224,8 +224,8 @@ class Decision(BaseModel):
     reasoning: str = Field(description="Short chart-based justification, journaled verbatim")
 
 
-class VisionPatternAnalysis(BaseModel):
-    """Structured chart read produced by the experimental vision mode.
+class PatternAnalysis(BaseModel):
+    """Structured chart read produced by the experimental pattern-data mode.
 
     This is deliberately not an executable ``Decision``. The graph must first
     validate direction, confirmation, and prices, then construct a normal
@@ -233,7 +233,7 @@ class VisionPatternAnalysis(BaseModel):
     """
 
     action: Literal["wait", "enter_call", "enter_put"] = "wait"
-    pattern: VisionPatternName = "none"
+    pattern: PatternName = "none"
     status: Literal["none", "forming", "confirmed"] = "none"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     breakout_price: float | None = Field(

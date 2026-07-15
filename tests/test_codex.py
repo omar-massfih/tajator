@@ -1,18 +1,17 @@
 import json
 import stat
-from pathlib import Path
 
 import pytest
 
 from tajator.llm.codex import (
     BRIEFING_SCHEMA,
-    VISION_PATTERN_SCHEMA,
+    PATTERN_ANALYSIS_SCHEMA,
     CodexDecider,
     _extract_json,
 )
-from tajator.llm.decide import build_llm, build_vision_llm, decide_entry
-from tajator.llm.vision import render_bar_chart, vision_messages
-from tajator.models import MorningBriefing, VisionPatternAnalysis
+from tajator.llm.decide import build_llm, build_pattern_llm, decide_entry
+from tajator.llm.pattern_data import build_pattern_data, pattern_messages
+from tajator.models import MorningBriefing, PatternAnalysis
 
 from conftest import ts, walk
 
@@ -112,7 +111,7 @@ def test_build_llm_routes_codex_briefing_output_model():
     assert decider.output_model is MorningBriefing
 
 
-def test_codex_decider_attaches_inline_chart_as_image(tmp_path):
+def test_codex_decider_receives_pattern_data_as_text(tmp_path):
     answer = json.dumps({
         "action": "wait", "pattern": "none", "status": "none", "confidence": 0.1,
         "breakout_price": None, "invalidation_price": None, "evidence": [],
@@ -130,21 +129,21 @@ def test_codex_decider_attaches_inline_chart_as_image(tmp_path):
         "open(out, 'w').write(answer)\n"
     )
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
-    chart = render_bar_chart("AAPL", walk(ts(9, 30), [100.0, 100.2, 100.1]))
+    data = build_pattern_data("AAPL", walk(ts(9, 30), [100.0] * 7))
     decider = CodexDecider(
-        binary=str(binary), output_model=VisionPatternAnalysis,
-        schema=VISION_PATTERN_SCHEMA,
+        binary=str(binary), output_model=PatternAnalysis,
+        schema=PATTERN_ANALYSIS_SCHEMA,
     )
 
-    result = decider.invoke(vision_messages("classify", chart))
+    result = decider.invoke(pattern_messages("classify", data))
 
     argv = json.loads(argv_file.read_text())
-    image_path = argv[argv.index("--image") + 1]
     assert result.action == "wait"
-    assert Path(image_path).read_bytes() == chart.png
+    assert "--image" not in argv
+    assert "bars: index,time,open,high,low,close,volume" in argv[-1]
 
 
-def test_build_vision_llm_supports_codex_subscription():
-    decider = build_vision_llm("codex")
+def test_build_pattern_llm_supports_codex_subscription():
+    decider = build_pattern_llm("codex")
     assert isinstance(decider, CodexDecider)
-    assert decider.output_model is VisionPatternAnalysis
+    assert decider.output_model is PatternAnalysis

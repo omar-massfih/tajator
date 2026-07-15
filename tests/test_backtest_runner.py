@@ -68,7 +68,7 @@ def test_run_backtest_across_days(tmp_path, monkeypatch):
     payload = json.loads(report_path.read_text())
     assert payload["metadata"]["experiment"] == "baseline"
     assert payload["metadata"]["use_llm"] is False
-    assert payload["metadata"]["vision_patterns"] is False
+    assert payload["metadata"]["pattern_data"] is False
     assert payload["metadata"]["execution_model"]["modeled_half_spread_pct"] == 0.01
     assert "approach_band_pct" in payload["metadata"]["strategy_config"]
     assert payload["metadata"]["strategy_config"]["reaction_lookback_bars"] == 5

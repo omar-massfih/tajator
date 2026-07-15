@@ -95,13 +95,13 @@ def test_guarded_execution_defaults():
     assert settings.execution_live_confirmed is False
 
 
-def test_vision_pattern_defaults_are_bounded_and_opt_in():
+def test_pattern_data_defaults_are_bounded_and_opt_in():
     settings = Settings(_env_file=None)
-    assert settings.vision_pattern_min_bars == 60
-    assert settings.vision_pattern_lookback_bars == 120
-    assert settings.vision_pattern_scan_interval_bars == 5
-    assert settings.vision_pattern_min_confidence == 0.8
-    assert settings.vision_pattern_max_chase_pct == 0.002
+    assert settings.pattern_data_min_bars == 60
+    assert settings.pattern_data_lookback_bars == 120
+    assert settings.pattern_data_scan_interval_bars == 5
+    assert settings.pattern_data_min_confidence == 0.8
+    assert settings.pattern_data_max_chase_pct == 0.002
 
 
 def test_level_quality_fields_parse_env_strings():
@@ -178,13 +178,13 @@ def test_invalid_price_action_settings_are_rejected(kwargs):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"vision_pattern_min_bars": 9},
-        {"vision_pattern_min_bars": 60, "vision_pattern_lookback_bars": 59},
-        {"vision_pattern_scan_interval_bars": 0},
-        {"vision_pattern_min_confidence": 1.1},
-        {"vision_pattern_max_chase_pct": 0},
+        {"pattern_data_min_bars": 9},
+        {"pattern_data_min_bars": 60, "pattern_data_lookback_bars": 59},
+        {"pattern_data_scan_interval_bars": 0},
+        {"pattern_data_min_confidence": 1.1},
+        {"pattern_data_max_chase_pct": 0},
     ],
 )
-def test_invalid_vision_pattern_settings_are_rejected(kwargs):
+def test_invalid_pattern_data_settings_are_rejected(kwargs):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **kwargs)

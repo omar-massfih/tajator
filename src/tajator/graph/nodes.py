@@ -13,8 +13,8 @@ from typing import Any
 from ..broker.base import Broker, OrderFailed
 from ..config import Settings
 from ..journal import Journal
-from ..llm.decide import build_llm, build_vision_llm, decide_entry, decide_scale, format_snapshot
-from ..llm.vision import decide_vision, render_bar_chart, validate_vision_entry
+from ..llm.decide import build_llm, build_pattern_llm, decide_entry, decide_scale, format_snapshot
+from ..llm.pattern_data import build_pattern_data, decide_pattern, validate_pattern_entry
 from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
@@ -24,7 +24,7 @@ from ..models import (
     ExecutedAction,
     MorningBriefing,
     MultiTimeframeContext,
-    VisionPatternAnalysis,
+    PatternAnalysis,
 )
 from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
@@ -45,14 +45,14 @@ class RuntimeContext:
     journal: Journal
     symbol: str
     use_llm: bool = True
-    vision_patterns: bool = False
+    pattern_data: bool = False
     notifier: Notifier = field(default_factory=NullNotifier)
     _llm: Any = field(default=None, repr=False)
     _prep_llm: Any = field(default=None, repr=False)
-    _vision_llm: Any = field(default=None, repr=False)
+    _pattern_llm: Any = field(default=None, repr=False)
     metrics: dict[str, int] = field(default_factory=dict)
     _daily_context_cache: dict[str, Any] = field(default_factory=dict, repr=False)
-    _last_vision_bar_ts: Any = field(default=None, repr=False)
+    _last_pattern_bar_ts: Any = field(default=None, repr=False)
 
     @property
     def llm(self) -> Any:
@@ -67,10 +67,10 @@ class RuntimeContext:
         return self._prep_llm
 
     @property
-    def vision_llm(self) -> Any:
-        if self._vision_llm is None:
-            self._vision_llm = build_vision_llm(self.settings.llm_model)
-        return self._vision_llm
+    def pattern_llm(self) -> Any:
+        if self._pattern_llm is None:
+            self._pattern_llm = build_pattern_llm(self.settings.llm_model)
+        return self._pattern_llm
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
@@ -220,20 +220,20 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     # ----- flat branch --------------------------------------------------------
 
     def detect_setups(state: AgentState) -> dict:
-        if ctx.vision_patterns:
+        if ctx.pattern_data:
             bars = state["bars"]
             bar_ts = bars[-1].ts
             now_et = bar_ts.astimezone(guardrails.ET)
             session_minute = now_et.hour * 60 + now_et.minute - (9 * 60 + 30)
             due = (
-                len(bars) >= settings.vision_pattern_min_bars
+                len(bars) >= settings.pattern_data_min_bars
                 and session_minute >= 0
-                and session_minute % settings.vision_pattern_scan_interval_bars == 0
-                and bar_ts != ctx._last_vision_bar_ts
+                and session_minute % settings.pattern_data_scan_interval_bars == 0
+                and bar_ts != ctx._last_pattern_bar_ts
             )
             if not due:
-                return {"candidates": [], "vision_scan_due": False}
-            ctx._last_vision_bar_ts = bar_ts
+                return {"candidates": [], "pattern_scan_due": False}
+            ctx._last_pattern_bar_ts = bar_ts
             blockers = guardrails.entry_blockers(
                 now=ctx.broker.now(),
                 position=state.get("position"),
@@ -245,11 +245,11 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
                 ctx.metrics["entry_blocker"] = ctx.metrics.get("entry_blocker", 0) + 1
                 ctx.journal.write(
                     "entry_pre_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
-                    candidates=[], violations=blockers, source="vision_patterns",
+                    candidates=[], violations=blockers, source="pattern_data",
                 )
             return {
                 "candidates": [],
-                "vision_scan_due": True,
+                "pattern_scan_due": True,
                 "entry_blockers": blockers,
             }
 
@@ -354,53 +354,52 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def llm_decide(state: AgentState) -> dict:
         snapshot, candidates = state["snapshot"], state["candidates"]
         update: dict[str, Any] = {}
-        if ctx.vision_patterns:
-            chart = render_bar_chart(
+        if ctx.pattern_data:
+            pattern_data = build_pattern_data(
                 ctx.symbol,
                 state["bars"],
-                limit=settings.vision_pattern_lookback_bars,
+                limit=settings.pattern_data_lookback_bars,
             )
             context = (
                 f"{ctx.symbol} at {snapshot.ts:%Y-%m-%d %H:%M} ET; "
                 f"latest completed close {snapshot.price:.2f}; ATR "
                 f"{snapshot.atr if snapshot.atr is not None else 'n/a'}. "
-                "Classify only the completed bars shown in the image."
+                "Classify only the completed numerical bars and pivots supplied below."
             )
             try:
-                analysis = decide_vision(ctx.vision_llm, context, chart)
+                analysis = decide_pattern(ctx.pattern_llm, context, pattern_data)
             except Exception as exc:  # noqa: BLE001 - model construction must fail closed
-                analysis = VisionPatternAnalysis(
+                analysis = PatternAnalysis(
                     action="wait",
-                    reasoning=f"vision LLM unavailable, defaulting to wait: {exc}",
+                    reasoning=f"pattern-data LLM unavailable, defaulting to wait: {exc}",
                 )
-            decision, candidate, violations = validate_vision_entry(
+            decision, candidate, violations = validate_pattern_entry(
                 analysis, state["bars"], snapshot, settings,
             )
-            vision_candidates = [candidate] if candidate is not None else []
+            pattern_candidates = [candidate] if candidate is not None else []
             if candidate is not None:
-                vision_candidates, cooled = guardrails.cooldown_filter(
-                    vision_candidates, state.get("cooldown_levels") or []
+                pattern_candidates, cooled = guardrails.cooldown_filter(
+                    pattern_candidates, state.get("cooldown_levels") or []
                 )
                 if cooled:
                     decision = Decision(
                         action="wait",
-                        reasoning="vision pattern rejected: breakout level is under stop cooldown",
+                        reasoning="pattern-data signal rejected: breakout level is under stop cooldown",
                     )
                     violations.append("breakout level is under stop cooldown")
             ctx.journal.write(
-                "vision_pattern_analysis",
+                "pattern_data_analysis",
                 ts=snapshot.ts,
                 symbol=ctx.symbol,
                 analysis=analysis,
                 validation_violations=violations,
-                chart={
-                    "sha256": chart.sha256,
-                    "bar_count": chart.bar_count,
-                    "width": chart.width,
-                    "height": chart.height,
+                pattern_data={
+                    "sha256": pattern_data.sha256,
+                    "bar_count": pattern_data.bar_count,
+                    "pivot_count": pattern_data.pivot_count,
                 },
             )
-            update["candidates"] = vision_candidates
+            update["candidates"] = pattern_candidates
         elif not ctx.use_llm:
             c = candidates[0]
             buffer = settings.stop_buffer_cents / 100

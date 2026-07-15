@@ -38,7 +38,7 @@ def route_manage_decision(state: AgentState) -> str:
 def route_setups(state: AgentState) -> str:
     if state.get("entry_blockers"):
         return END
-    if not state.get("candidates") and not state.get("vision_scan_due"):
+    if not state.get("candidates") and not state.get("pattern_scan_due"):
         return END
     return "llm_decide"
 

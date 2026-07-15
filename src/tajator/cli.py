@@ -31,7 +31,7 @@ def _validate_tws_chain_snapshot(args, start, end, now: datetime) -> None:
 
 
 def _runtime_policy_metadata(
-    settings, deterministic: bool, vision_patterns: bool = False,
+    settings, deterministic: bool, pattern_data: bool = False,
 ) -> dict:
     """Journal enough identity to keep incompatible execution samples separate."""
     from .backtest.forward import _definition, _source_fingerprint
@@ -39,7 +39,7 @@ def _runtime_policy_metadata(
     return {
         "policy_mode": (
             "deterministic" if deterministic else
-            "vision_patterns" if vision_patterns else "llm"
+            "pattern_data" if pattern_data else "llm"
         ),
         "validation_compatible": deterministic,
         "source_fingerprint": _source_fingerprint(),
@@ -68,8 +68,8 @@ def main() -> None:
         help="opt into experimental LLM entry and management decisions",
     )
     run_policy.add_argument(
-        "--vision-patterns", dest="decision_mode", action="store_const", const="vision_patterns",
-        help="paper-only: classify bar-chart images for confirmed pattern entries",
+        "--pattern-data", dest="decision_mode", action="store_const", const="pattern_data",
+        help="paper-only: classify numerical OHLCV/pivot data for confirmed pattern entries",
     )
     shadow = sub.add_parser(
         "shadow",
@@ -116,8 +116,8 @@ def main() -> None:
     replay_policy = replay.add_mutually_exclusive_group()
     replay_policy.add_argument("--no-llm", action="store_true", help="deterministic rule-follower instead of the LLM")
     replay_policy.add_argument(
-        "--vision-patterns", action="store_true",
-        help="classify bar-chart images for confirmed pattern entries",
+        "--pattern-data", action="store_true",
+        help="classify numerical OHLCV/pivot data for confirmed pattern entries",
     )
     replay.add_argument("--prev-high", type=float, default=None)
     replay.add_argument("--prev-low", type=float, default=None)
@@ -131,8 +131,8 @@ def main() -> None:
     backtest_policy = backtest.add_mutually_exclusive_group()
     backtest_policy.add_argument("--no-llm", action="store_true", help="deterministic rule-follower instead of the LLM")
     backtest_policy.add_argument(
-        "--vision-patterns", action="store_true",
-        help="classify historical bar-chart images for confirmed pattern entries",
+        "--pattern-data", action="store_true",
+        help="classify historical numerical OHLCV/pivot data for confirmed pattern entries",
     )
     backtest.add_argument("--cache-dir", type=Path, default=None, help="defaults to Settings.backtest_cache_dir")
     backtest.add_argument(
@@ -296,7 +296,7 @@ def main() -> None:
 
     if args.command == "run":
         args.deterministic = args.decision_mode == "deterministic"
-        args.vision_patterns = args.decision_mode == "vision_patterns"
+        args.pattern_data = args.decision_mode == "pattern_data"
         cmd_run(args)
     elif args.command == "shadow":
         cmd_shadow(args)
@@ -368,15 +368,15 @@ def _ib_broker(settings=None, notifier=None):
 
 def cmd_run(args) -> None:
     from .graph.nodes import RuntimeContext
-    from .llm.decide import build_llm, build_vision_llm
+    from .llm.decide import build_llm, build_pattern_llm
     from .models import MorningBriefing
     from .runner import LiveRunner, TradingSession
     from .startup import check_execution_diagnostics, check_kill_switch, run_startup_checks
     from .state_store import StateStore
 
     settings = load_settings()
-    if args.vision_patterns and settings.trading_mode != "paper":
-        sys.exit("--vision-patterns is experimental and restricted to TRADING_MODE=paper")
+    if args.pattern_data and settings.trading_mode != "paper":
+        sys.exit("--pattern-data is experimental and restricted to TRADING_MODE=paper")
     notifier = _notifier(settings)
     check_kill_switch(settings, notifier)
     check_execution_diagnostics(settings)
@@ -385,7 +385,7 @@ def cmd_run(args) -> None:
     broker.journal = journal  # order timelines land next to the trade records
     journal.write(
         "policy_start", ts=broker.now(),
-        **_runtime_policy_metadata(settings, args.deterministic, args.vision_patterns),
+        **_runtime_policy_metadata(settings, args.deterministic, args.pattern_data),
     )
     store = StateStore(settings.state_file)
     try:
@@ -395,14 +395,14 @@ def cmd_run(args) -> None:
     except SystemExit:
         broker.disconnect()
         raise
-    llm = prep_llm = vision_llm = None
+    llm = prep_llm = pattern_llm = None
     if not args.deterministic:
         try:
             # fail fast on a missing/invalid API key instead of waiting all day
             llm = build_llm(settings.llm_model)
             prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
-            if args.vision_patterns:
-                vision_llm = build_vision_llm(settings.llm_model)
+            if args.pattern_data:
+                pattern_llm = build_pattern_llm(settings.llm_model)
         except Exception as exc:  # noqa: BLE001
             broker.disconnect()
             sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
@@ -412,9 +412,9 @@ def cmd_run(args) -> None:
             RuntimeContext(
                 settings=settings, broker=broker, journal=journal, symbol=symbol,
                 use_llm=not args.deterministic,
-                vision_patterns=args.vision_patterns,
+                pattern_data=args.pattern_data,
                 notifier=notifier, _llm=llm, _prep_llm=prep_llm,
-                _vision_llm=vision_llm,
+                _pattern_llm=pattern_llm,
             ),
             store=store,
             restored=adopted.get(symbol),
@@ -809,7 +809,7 @@ def cmd_replay(args) -> None:
     from .runner import TradingSession
 
     settings = load_settings()
-    vision_patterns = getattr(args, "vision_patterns", False)
+    pattern_data = getattr(args, "pattern_data", False)
     symbol = args.symbol or settings.symbols[0]
     if args.csv:
         stub = StubBroker.from_csv(args.csv, args.prev_high, args.prev_low)
@@ -858,7 +858,7 @@ def cmd_replay(args) -> None:
         journal=Journal(settings.log_dir / "replays"),
         symbol=symbol,
         use_llm=not args.no_llm,
-        vision_patterns=vision_patterns,
+        pattern_data=pattern_data,
     )
     TradingSession(ctx).run_replay(stub)
 
@@ -870,7 +870,7 @@ def cmd_backtest(args) -> None:
 
     # A cached-only research run must be genuinely offline; connecting to IB
     # would make the reproducible A/B gate depend on Gateway availability.
-    vision_patterns = getattr(args, "vision_patterns", False)
+    pattern_data = getattr(args, "pattern_data", False)
     if args.cached_only:
         settings, ib = load_settings(), None
     else:
@@ -903,7 +903,7 @@ def cmd_backtest(args) -> None:
             cached_only=args.cached_only,
             experiment=args.experiment,
             chain_override=chain_override,
-            vision_patterns=vision_patterns,
+            pattern_data=pattern_data,
         )
     except Exception as exc:  # noqa: BLE001 — e.g. bad LLM config; fail with a clean message
         if ib is not None:

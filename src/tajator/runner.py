@@ -333,7 +333,7 @@ class LiveRunner:
     def run(self) -> None:
         mode = self.sessions[0].ctx.settings.trading_mode.upper()
         decisions = (
-            "VISION PATTERNS" if self.sessions[0].ctx.vision_patterns else
+            "PATTERN DATA" if self.sessions[0].ctx.pattern_data else
             "LLM" if self.sessions[0].ctx.use_llm else "DETERMINISTIC"
         )
         symbols = ", ".join(sess.ctx.symbol for sess in self.sessions)

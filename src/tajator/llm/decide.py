@@ -20,7 +20,7 @@ from ..models import (
     OpenPosition,
     SetupCandidate,
     Snapshot,
-    VisionPatternAnalysis,
+    PatternAnalysis,
 )
 from ..trade.position import active_stop_price
 from .prompts import PREP_SYSTEM_PROMPT, SYSTEM_PROMPT
@@ -38,15 +38,15 @@ def build_llm(model_string: str, output_model: type[BaseModel] = Decision):
         from .codex import (
             BRIEFING_SCHEMA,
             DECISION_SCHEMA,
-            VISION_PATTERN_SCHEMA,
+            PATTERN_ANALYSIS_SCHEMA,
             CodexDecider,
         )
 
         _, _, model = model_string.partition(":")
         if output_model is MorningBriefing:
             schema = BRIEFING_SCHEMA
-        elif output_model is VisionPatternAnalysis:
-            schema = VISION_PATTERN_SCHEMA
+        elif output_model is PatternAnalysis:
+            schema = PATTERN_ANALYSIS_SCHEMA
         elif output_model is Decision:
             schema = DECISION_SCHEMA
         else:
@@ -56,9 +56,9 @@ def build_llm(model_string: str, output_model: type[BaseModel] = Decision):
     return llm.with_structured_output(output_model)
 
 
-def build_vision_llm(model_string: str):
-    """Build the structured multimodal classifier used only by vision mode."""
-    return build_llm(model_string, output_model=VisionPatternAnalysis)
+def build_pattern_llm(model_string: str):
+    """Build the structured classifier used only by pattern-data mode."""
+    return build_llm(model_string, output_model=PatternAnalysis)
 
 
 def format_snapshot(

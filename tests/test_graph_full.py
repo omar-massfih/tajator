@@ -16,7 +16,7 @@ from tajator.graph.nodes import make_nodes
 from tajator.journal import Journal
 from tajator.runner import TradingSession
 from tajator.market.indicators import build_snapshot
-from tajator.models import VisionPatternAnalysis
+from tajator.models import PatternAnalysis
 
 ET = ZoneInfo("America/New_York")
 CSV = Path(__file__).parent / "data" / "spy_sample_day.csv"
@@ -96,14 +96,14 @@ def test_kill_switch_blocks_all_entries(session):
     assert broker.fills == [], "kill switch must prevent every entry"
 
 
-def test_vision_mode_creates_only_a_validated_synthetic_candidate(tmp_path):
+def test_pattern_data_mode_creates_only_a_validated_synthetic_candidate(tmp_path):
     bars = walk(ts(9, 30), [99.5] * 58 + [99.8, 100.0, 100.2])
     broker = StubBroker(bars, prev_day_high=105.0, prev_day_low=95.0)
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
 
-    class VisionLLM:
+    class PatternLLM:
         def invoke(self, messages):
-            return VisionPatternAnalysis(
+            return PatternAnalysis(
                 action="enter_call",
                 pattern="double_bottom",
                 status="confirmed",
@@ -120,8 +120,8 @@ def test_vision_mode_creates_only_a_validated_synthetic_candidate(tmp_path):
         journal=Journal(tmp_path),
         symbol="AAPL",
         use_llm=True,
-        vision_patterns=True,
-        _vision_llm=VisionLLM(),
+        pattern_data=True,
+        _pattern_llm=PatternLLM(),
     )
     nodes = make_nodes(ctx)
     state = {
@@ -133,25 +133,25 @@ def test_vision_mode_creates_only_a_validated_synthetic_candidate(tmp_path):
     }
 
     setup = nodes["detect_setups"](state)
-    assert setup["vision_scan_due"] is True
+    assert setup["pattern_scan_due"] is True
     decision = nodes["llm_decide"]({**state, **setup})
 
     assert decision["decision"].action == "enter_call"
-    assert decision["candidates"][0].level.label == "vision_double_bottom"
+    assert decision["candidates"][0].level.label == "pattern_double_bottom"
     content = next(tmp_path.glob("journal-*.jsonl")).read_text()
-    assert '"vision_pattern_analysis"' in content
+    assert '"pattern_data_analysis"' in content
     assert '"sha256"' in content
 
 
-def test_compiled_graph_can_enter_call_from_validated_vision_pattern(tmp_path):
+def test_compiled_graph_can_enter_call_from_validated_pattern_data(tmp_path):
     bars = walk(ts(9, 30), [99.5] * 58 + [99.8, 100.0, 100.2])
     broker = StubBroker(bars, prev_day_high=105.0, prev_day_low=95.0)
     broker.seek(bars[-1].ts)
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
 
-    class VisionLLM:
+    class PatternLLM:
         def invoke(self, messages):
-            return VisionPatternAnalysis(
+            return PatternAnalysis(
                 action="enter_call", pattern="double_bottom", status="confirmed",
                 confidence=0.88, breakout_price=100.0, invalidation_price=99.5,
                 evidence=["two lows", "close above neckline"],
@@ -160,7 +160,7 @@ def test_compiled_graph_can_enter_call_from_validated_vision_pattern(tmp_path):
 
     session = TradingSession(RuntimeContext(
         settings=settings, broker=broker, journal=Journal(tmp_path), symbol="AAPL",
-        use_llm=True, vision_patterns=True, _vision_llm=VisionLLM(),
+        use_llm=True, pattern_data=True, _pattern_llm=PatternLLM(),
     ))
 
     out = session.tick()

@@ -35,7 +35,7 @@ class AgentState(TypedDict, total=False):
     levels: list[Level]
     candidates: list[SetupCandidate]
     entry_blockers: list[str]
-    vision_scan_due: bool
+    pattern_scan_due: bool
     manage_action: ManageAction
     decision: Decision
     risk: RiskVerdict

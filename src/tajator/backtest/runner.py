@@ -17,7 +17,7 @@ from ..broker.stub import StubBroker
 from ..config import Settings
 from ..graph.nodes import RuntimeContext
 from ..journal import Journal
-from ..llm.decide import build_llm, build_vision_llm
+from ..llm.decide import build_llm, build_pattern_llm
 from ..runner import TradingSession
 from .data import (
     ET,
@@ -40,7 +40,7 @@ def run_backtest(
     experiment: str = "baseline",
     chain_override: ChainParams | None = None,
     option_panel: bool = False,
-    vision_patterns: bool = False,
+    pattern_data: bool = False,
 ) -> BacktestReport:
     days = trading_days(start, end)
     # Underlying research already loads every minute of every session. Derive
@@ -58,7 +58,7 @@ def run_backtest(
         f"{symbol}_{start.isoformat()}_{end.isoformat()}_{experiment}"
     )
     llm = build_llm(settings.llm_model) if use_llm else None
-    vision_llm = build_vision_llm(settings.llm_model) if vision_patterns else None
+    pattern_llm = build_pattern_llm(settings.llm_model) if pattern_data else None
 
     fills_by_day = {}
     bars_by_day = {}
@@ -90,8 +90,8 @@ def run_backtest(
         )
         ctx = RuntimeContext(
             settings=settings, broker=broker, journal=journal, symbol=symbol,
-            use_llm=use_llm, vision_patterns=vision_patterns,
-            _llm=llm, _vision_llm=vision_llm, metrics=metrics,
+            use_llm=use_llm, pattern_data=pattern_data,
+            _llm=llm, _pattern_llm=pattern_llm, metrics=metrics,
         )
         try:
             TradingSession(ctx).run_replay(broker, verbose=False)
@@ -131,7 +131,7 @@ def run_backtest(
     resolved_config = _strategy_config(settings.for_symbol(symbol))
     metadata = {
         "use_llm": use_llm,
-        "vision_patterns": vision_patterns,
+        "pattern_data": pattern_data,
         "llm_model": settings.llm_model if use_llm else None,
         "code_revision": _code_revision(),
         "execution_model": {
@@ -243,9 +243,9 @@ def _strategy_config(settings: Settings) -> dict:
         "entry_confirmation", "max_entry_to_stop_cents", "no_new_entries_before",
         "opening_confirmation_until", "stop_atr_multiplier", "atr_window_bars",
         "allowed_regimes", "blocked_direction_regimes", "min_level_quality_score",
-        "vision_pattern_min_bars", "vision_pattern_lookback_bars",
-        "vision_pattern_scan_interval_bars", "vision_pattern_min_confidence",
-        "vision_pattern_max_chase_pct",
+        "pattern_data_min_bars", "pattern_data_lookback_bars",
+        "pattern_data_scan_interval_bars", "pattern_data_min_confidence",
+        "pattern_data_max_chase_pct",
         "stop_min_cents", "stop_max_cents", "stop_cooldown_minutes", "runner_stop",
     )
     return {name: getattr(settings, name) for name in names}
