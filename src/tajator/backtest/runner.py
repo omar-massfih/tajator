@@ -13,11 +13,10 @@ from pathlib import Path
 
 from ..broker.base import ChainParams
 from ..broker.backtest import BacktestBroker
-from ..broker.stub import StubBroker
+from ..broker.underlying import UnderlyingBacktestBroker
 from ..config import Settings
 from ..graph.nodes import RuntimeContext
 from ..journal import Journal
-from ..llm.decide import build_llm, build_pattern_llm
 from ..runner import TradingSession
 from .data import (
     ET,
@@ -33,14 +32,13 @@ log = logging.getLogger(__name__)
 
 
 def run_backtest(
-    symbol: str, start: date, end: date, settings: Settings, use_llm: bool, ib, cache_dir: Path,
+    symbol: str, start: date, end: date, settings: Settings, ib, cache_dir: Path,
     *, skip_missing_option_data: bool = False,
     underlying_only: bool = False,
     cached_only: bool = False,
     experiment: str = "baseline",
     chain_override: ChainParams | None = None,
     option_panel: bool = False,
-    pattern_data: bool = False,
 ) -> BacktestReport:
     days = trading_days(start, end)
     # Underlying research already loads every minute of every session. Derive
@@ -48,7 +46,7 @@ def run_backtest(
     # this also keeps cached research runnable during a daily-data farm outage.
     daily_series = (
         fetch_daily_series(ib, symbol, start, end)
-        if ib is not None and (not underlying_only or settings.for_symbol(symbol).multi_timeframe_context)
+        if ib is not None and not underlying_only
         else daily_series_from_underlying_cache(cache_dir, symbol)
     )
     rolling_prev_range: tuple[float | None, float | None] = (None, None)
@@ -57,8 +55,6 @@ def run_backtest(
         settings.log_dir / "backtests" /
         f"{symbol}_{start.isoformat()}_{end.isoformat()}_{experiment}"
     )
-    llm = build_llm(settings.llm_model) if use_llm else None
-    pattern_llm = build_pattern_llm(settings.llm_model) if pattern_data else None
 
     fills_by_day = {}
     bars_by_day = {}
@@ -76,7 +72,7 @@ def run_backtest(
             prev_day_range_for(daily_series, day) if daily_series else rolling_prev_range
         )
         broker = (
-            StubBroker(bars, prev_high, prev_low, daily_bars=daily_series)
+            UnderlyingBacktestBroker(bars, prev_high, prev_low, daily_bars=daily_series)
             if underlying_only else
             BacktestBroker(
                 bars, prev_high, prev_low, ib=ib, cache_dir=cache_dir,
@@ -90,8 +86,7 @@ def run_backtest(
         )
         ctx = RuntimeContext(
             settings=settings, broker=broker, journal=journal, symbol=symbol,
-            use_llm=use_llm, pattern_data=pattern_data,
-            _llm=llm, _pattern_llm=pattern_llm, metrics=metrics,
+            metrics=metrics,
         )
         try:
             TradingSession(ctx).run_replay(broker, verbose=False)
@@ -130,9 +125,8 @@ def run_backtest(
 
     resolved_config = _strategy_config(settings.for_symbol(symbol))
     metadata = {
-        "use_llm": use_llm,
-        "pattern_data": pattern_data,
-        "llm_model": settings.llm_model if use_llm else None,
+        "policy_mode": "deterministic",
+        "strategy": "orb",
         "code_revision": _code_revision(),
         "execution_model": {
             "price_source": "next option bar open (last bar close at EOD)",
@@ -177,24 +171,6 @@ def run_backtest(
             if option_panel else {"enabled": False}
         ),
         "veto_counts": metrics,
-        "multi_timeframe_context": settings.for_symbol(symbol).multi_timeframe_context,
-        "multi_timeframe_model": {
-            "daily_history_sessions": 90,
-            "daily_bias": "close/EMA20/EMA50 stack with 5-session EMA20 slope",
-            "daily_atr_window": 14,
-            "daily_pivot_window_each_side": 2,
-            "daily_confluence_atr_fraction": 0.15,
-            "five_minute_alignment": "09:30 ET regular session",
-            "five_minute_completed_bars": 6,
-            "five_minute_forming_bar_included": True,
-            "score_weights": {
-                "daily_bias": 0.5,
-                "daily_confluence": 0.5,
-                "five_minute_trend": 0.5,
-                "five_minute_reaction": 0.5,
-            },
-            "selection_policy": "rank only; base quality thresholds unchanged",
-        },
     }
     report = build_report(
         symbol, start, end, fills_by_day, metadata=metadata, bars_by_day=bars_by_day
@@ -233,19 +209,9 @@ def _code_revision() -> str | None:
 
 def _strategy_config(settings: Settings) -> dict:
     names = (
+        "orb_window_minutes", "orb_breakout_buffer_pct",
         "max_trades_per_day", "max_contracts", "max_premium_usd", "stop_buffer_cents",
-        "multi_timeframe_context",
-        "no_new_entries_after", "double_min_touch_separation_bars", "double_min_pullback_pct",
-        "min_level_dist_from_open_pct", "swing_window_bars", "level_cluster_tol_pct",
-        "approach_band_pct", "overshoot_band_pct", "speed_window_bars", "min_speed_pct",
-        "fast_approach_speed_mult", "rejection_wick_min_frac", "trade_flipped_levels",
-        "reaction_lookback_bars", "long_wick_min_frac",
-        "entry_confirmation", "max_entry_to_stop_cents", "no_new_entries_before",
-        "opening_confirmation_until", "stop_atr_multiplier", "atr_window_bars",
-        "allowed_regimes", "blocked_direction_regimes", "min_level_quality_score",
-        "pattern_data_min_bars", "pattern_data_lookback_bars",
-        "pattern_data_scan_interval_bars", "pattern_data_min_confidence",
-        "pattern_data_max_chase_pct",
+        "no_new_entries_before", "no_new_entries_after", "atr_window_bars",
         "stop_min_cents", "stop_max_cents", "stop_cooldown_minutes", "runner_stop",
     )
     return {name: getattr(settings, name) for name in names}

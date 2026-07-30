@@ -32,7 +32,7 @@ class RecordingNotifier:
 def make_session(tmp_path, broker):
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     return TradingSession(ctx)
 
@@ -40,7 +40,7 @@ def make_session(tmp_path, broker):
 def make_session_with_notifier(tmp_path, broker, notifier):
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False,
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY",
         notifier=notifier,
     )
     return TradingSession(ctx)

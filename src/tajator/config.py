@@ -9,94 +9,27 @@ from typing import Annotated, Literal
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .market.levels import (
-    CLUSTER_TOL,
-    DOUBLE_MIN_PULLBACK_PCT,
-    DOUBLE_MIN_TOUCH_SEPARATION_BARS,
-    SWING_WINDOW,
-)
-from .market.setups import (
-    APPROACH_BAND,
-    ENTRY_CONFIRMATION,
-    FAST_APPROACH_SPEED_MULT,
-    MIN_LEVEL_DIST_FROM_OPEN_PCT,
-    MIN_SPEED_PCT,
-    OVERSHOOT_BAND,
-    REJECTION_WICK_MIN_FRAC,
-    SPEED_WINDOW,
-    TRADE_FLIPPED_LEVELS,
-)
-from .market.price_action import LONG_WICK_MIN_FRAC, REACTION_LOOKBACK_BARS
 from .risk.guardrails import STOP_COOLDOWN_MINUTES, STOP_MAX_CENTS, STOP_MIN_CENTS
 
 AGENT_DIR = Path(__file__).resolve().parents[2]
 LIVE_PORTS = {4001, 7496}  # 4001 = IB Gateway live, 7496 = TWS live
 PAPER_PORTS = {4002, 7497}  # 4002 = IB Gateway paper, 7497 = TWS paper
-REGIMES = {"unknown", "range", "trend_up", "trend_down", "high_volatility"}
 
 
 class SymbolStrategyOverride(BaseModel):
-    multi_timeframe_context: bool | None = None
-    entry_confirmation: Literal["immediate", "touch_rejection"] | None = None
-    max_entry_to_stop_cents: int | None = None
+    """Per-symbol overrides for the small set of knobs that vary by name."""
+
     no_new_entries_before: time | None = None
     no_new_entries_after: time | None = None
-    opening_confirmation_until: time | None = None
-    stop_atr_multiplier: float | None = None
-    allowed_regimes: list[str] | None = None
-    blocked_direction_regimes: list[str] | None = None
-    min_level_quality_score: float | None = None
-    reaction_lookback_bars: int | None = None
-    long_wick_min_frac: float | None = None
-
-    @field_validator("blocked_direction_regimes")
-    @classmethod
-    def _valid_direction_regimes(cls, values):
-        _validate_direction_regimes(values or [])
-        return values
-
-    @model_validator(mode="after")
-    def _valid_values(self):
-        for name in ("max_entry_to_stop_cents", "stop_atr_multiplier", "min_level_quality_score"):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if self.reaction_lookback_bars is not None and self.reaction_lookback_bars < 2:
-            raise ValueError("reaction_lookback_bars must be at least 2")
-        if self.long_wick_min_frac is not None and not 0 <= self.long_wick_min_frac <= 1:
-            raise ValueError("long_wick_min_frac must be between 0 and 1")
-        return self
 
 
 def _default_symbol_strategy_overrides() -> dict[str, SymbolStrategyOverride]:
-    """Return the frozen AAPL candidate used by ordinary deterministic runs."""
-    return {
-        "AAPL": SymbolStrategyOverride(
-            entry_confirmation="touch_rejection",
-            max_entry_to_stop_cents=100,
-            no_new_entries_after=time(14, 0),
-            blocked_direction_regimes=["put:trend_up"],
-        )
-    }
-
-
-def _validate_direction_regimes(values: list[str]) -> None:
-    valid = {f"{direction}:{regime}" for direction in ("call", "put") for regime in REGIMES}
-    invalid = sorted(set(values) - valid)
-    if invalid:
-        raise ValueError(f"invalid direction/regime blocks: {', '.join(invalid)}")
+    """No per-symbol overrides by default — the ORB strategy is symbol-agnostic."""
+    return {}
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
-    # LLM
-    llm_model: str = "openai:gpt-5.1"
-    pattern_data_min_bars: int = 60
-    pattern_data_lookback_bars: int = 120
-    pattern_data_scan_interval_bars: int = 5
-    pattern_data_min_confidence: float = 0.80
-    pattern_data_max_chase_pct: float = 0.002
 
     # Interactive Brokers
     ib_host: str = "127.0.0.1"
@@ -122,15 +55,17 @@ class Settings(BaseSettings):
     execution_diagnostic_max_age_days: int = 7
     execution_live_confirmed: bool = False
 
-    # Strategy
+    # Strategy — Opening-Range Breakout
     symbols: Annotated[list[str], NoDecode] = ["SPY"]
-    multi_timeframe_context: bool = False
+    orb_window_minutes: int = 15  # opening range = first N minutes after 09:30 ET
+    orb_breakout_buffer_pct: float = 0.0005  # close must clear the range by this fraction
     max_trades_per_day: int = 2
-    max_contracts: int = 4
-    max_premium_usd: float = 500.0
-    stop_buffer_cents: int = 40
+    max_contracts: int = 10  # raised (aggressive but capped)
+    max_premium_usd: float = 2000.0  # raised (aggressive but capped)
+    stop_buffer_cents: int = 40  # fallback stop when a candidate carries none
     no_new_entries_after: time = time(15, 30)
     no_new_entries_before: time = time(9, 30)
+    atr_window_bars: int = 14
     # Broker-side protective stop: a GTC market sell resting at IB, triggered
     # by the underlying crossing the plan's stop price. Backstop for the
     # in-loop mental stop — protects the position when tajator is down.
@@ -138,38 +73,6 @@ class Settings(BaseSettings):
         default=False, validation_alias=AliasChoices("PROTECTIVE_STOP", "protective_stop_enabled")
     )
     order_ref_prefix: str = "tajator"  # provenance tag on every order we place
-
-    # Level quality gates (defaults live next to the algorithms in market/)
-    double_min_touch_separation_bars: int = DOUBLE_MIN_TOUCH_SEPARATION_BARS
-    double_min_pullback_pct: float = DOUBLE_MIN_PULLBACK_PCT
-    min_level_dist_from_open_pct: float = MIN_LEVEL_DIST_FROM_OPEN_PCT
-    swing_window_bars: int = SWING_WINDOW
-    level_cluster_tol_pct: float = CLUSTER_TOL
-
-    # Setup detection tuning (defaults live next to the algorithm in market/setups.py)
-    approach_band_pct: float = APPROACH_BAND
-    overshoot_band_pct: float = OVERSHOOT_BAND
-    speed_window_bars: int = SPEED_WINDOW
-    min_speed_pct: float = MIN_SPEED_PCT
-    fast_approach_speed_mult: float = FAST_APPROACH_SPEED_MULT
-    rejection_wick_min_frac: float = REJECTION_WICK_MIN_FRAC
-    reaction_lookback_bars: int = REACTION_LOOKBACK_BARS
-    long_wick_min_frac: float = LONG_WICK_MIN_FRAC
-    # Role-reversed levels (a broken support retested as resistance, and vice
-    # versa) are chart context, not trades — the worst entry class in backtests.
-    trade_flipped_levels: bool = TRADE_FLIPPED_LEVELS
-    entry_confirmation: Literal["immediate", "touch_rejection"] = ENTRY_CONFIRMATION
-    opening_confirmation_until: time | None = None
-    max_entry_to_stop_cents: int | None = None
-    stop_atr_multiplier: float | None = None
-    atr_window_bars: int = 14
-    allowed_regimes: list[str] = Field(default_factory=list)
-    blocked_direction_regimes: list[str] = Field(default_factory=list)
-    min_level_quality_score: float | None = None
-    # Frozen research candidate: AAPL waits for rejection confirmation, caps
-    # entry-to-stop distance at $1, stops entering at 14:00 ET, and avoids puts
-    # in an up-trend regime. An explicit SYMBOL_STRATEGY_OVERRIDES value still
-    # replaces this mapping, so deployments can deliberately choose otherwise.
     symbol_strategy_overrides: dict[str, SymbolStrategyOverride] = Field(
         default_factory=_default_symbol_strategy_overrides
     )
@@ -205,7 +108,7 @@ class Settings(BaseSettings):
     log_dir: Path = AGENT_DIR / "logs"
     backtest_cache_dir: Path = AGENT_DIR / "data" / "historical"
 
-    @field_validator("no_new_entries_after", "no_new_entries_before", "opening_confirmation_until", mode="before")
+    @field_validator("no_new_entries_after", "no_new_entries_before", mode="before")
     @classmethod
     def _parse_time(cls, v: object) -> object:
         if isinstance(v, str) and ":" in v:
@@ -219,12 +122,6 @@ class Settings(BaseSettings):
         if isinstance(v, dict):
             return {str(k).upper(): value for k, value in v.items()}
         return v
-
-    @field_validator("blocked_direction_regimes")
-    @classmethod
-    def _valid_global_direction_regimes(cls, values: list[str]) -> list[str]:
-        _validate_direction_regimes(values)
-        return values
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -261,34 +158,23 @@ class Settings(BaseSettings):
             )
         if self.no_new_entries_before >= self.no_new_entries_after:
             raise ValueError("NO_NEW_ENTRIES_BEFORE must be before NO_NEW_ENTRIES_AFTER")
-        for name in ("max_entry_to_stop_cents", "stop_atr_multiplier", "min_level_quality_score"):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be positive")
         if self.atr_window_bars < 2:
             raise ValueError("ATR_WINDOW_BARS must be at least 2")
-        if self.reaction_lookback_bars < 2:
-            raise ValueError("REACTION_LOOKBACK_BARS must be at least 2")
-        if self.pattern_data_min_bars < 10:
-            raise ValueError("PATTERN_DATA_MIN_BARS must be at least 10")
-        if self.pattern_data_lookback_bars < self.pattern_data_min_bars:
-            raise ValueError(
-                "PATTERN_DATA_LOOKBACK_BARS must be at least PATTERN_DATA_MIN_BARS"
-            )
-        if self.pattern_data_scan_interval_bars < 1:
-            raise ValueError("PATTERN_DATA_SCAN_INTERVAL_BARS must be positive")
-        if not 0 <= self.pattern_data_min_confidence <= 1:
-            raise ValueError("PATTERN_DATA_MIN_CONFIDENCE must be between 0 and 1")
-        if self.pattern_data_max_chase_pct <= 0:
-            raise ValueError("PATTERN_DATA_MAX_CHASE_PCT must be positive")
-        if not 0 <= self.long_wick_min_frac <= 1:
-            raise ValueError("LONG_WICK_MIN_FRAC must be between 0 and 1")
+        if self.orb_window_minutes < 1:
+            raise ValueError("ORB_WINDOW_MINUTES must be at least 1")
+        if self.orb_breakout_buffer_pct < 0:
+            raise ValueError("ORB_BREAKOUT_BUFFER_PCT cannot be negative")
         for name in (
             "max_option_spread_cents", "max_entry_drift_min_cents",
             "max_execution_slippage_cents", "execution_diagnostic_max_age_days",
+            "stop_min_cents", "stop_max_cents", "max_contracts", "max_trades_per_day",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name.upper()} must be positive")
+        if self.stop_min_cents > self.stop_max_cents:
+            raise ValueError("STOP_MIN_CENTS must not exceed STOP_MAX_CENTS")
+        if self.max_premium_usd <= 0:
+            raise ValueError("MAX_PREMIUM_USD must be positive")
         return self
 
     def for_symbol(self, symbol: str) -> "Settings":

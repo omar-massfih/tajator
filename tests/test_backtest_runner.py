@@ -53,7 +53,7 @@ def test_run_backtest_across_days(tmp_path, monkeypatch):
 
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     report = run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, use_llm=False, ib=None, cache_dir=tmp_path
+        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, ib=None, cache_dir=tmp_path
     )
 
     assert report.symbol == "SPY"
@@ -67,12 +67,11 @@ def test_run_backtest_across_days(tmp_path, monkeypatch):
     assert report_path.exists()
     payload = json.loads(report_path.read_text())
     assert payload["metadata"]["experiment"] == "baseline"
-    assert payload["metadata"]["use_llm"] is False
-    assert payload["metadata"]["pattern_data"] is False
+    assert payload["metadata"]["policy_mode"] == "deterministic"
+    assert payload["metadata"]["strategy"] == "orb"
     assert payload["metadata"]["execution_model"]["modeled_half_spread_pct"] == 0.01
-    assert "approach_band_pct" in payload["metadata"]["strategy_config"]
-    assert payload["metadata"]["strategy_config"]["reaction_lookback_bars"] == 5
-    assert payload["metadata"]["strategy_config"]["long_wick_min_frac"] == 0.25
+    assert "orb_window_minutes" in payload["metadata"]["strategy_config"]
+    assert payload["metadata"]["strategy_config"]["orb_window_minutes"] == 15
 
 
 def test_experiment_name_is_sanitized_in_output_path(tmp_path, monkeypatch):
@@ -85,7 +84,7 @@ def test_experiment_name_is_sanitized_in_output_path(tmp_path, monkeypatch):
     )
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, False, None, tmp_path,
+        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, None, tmp_path,
         experiment="risk cap / 100c",
     )
     assert (tmp_path / "logs" / "backtests" /
@@ -102,7 +101,7 @@ def test_skip_missing_option_data_discards_whole_day_and_records_coverage(tmp_pa
     monkeypatch.setattr("tajator.backtest.runner.TradingSession.run_replay", missing_option_day)
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     report = run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, use_llm=False, ib=None,
+        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, ib=None,
         cache_dir=tmp_path, skip_missing_option_data=True,
     )
     assert report.total_trades == 0
@@ -121,7 +120,7 @@ def test_underlying_only_does_not_request_option_history(tmp_path, monkeypatch):
     monkeypatch.setattr("tajator.broker.backtest.ensure_option_bars", option_history_must_not_run)
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     report = run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, use_llm=False, ib=None,
+        "SPY", DAY_WITH_TRADE, DAY_FLAT, settings, ib=None,
         cache_dir=tmp_path, underlying_only=True,
     )
     assert report.metadata["research_mode"] == "underlying_only"
@@ -147,7 +146,7 @@ def test_forward_chain_snapshot_is_disclosed_and_passed_to_broker(tmp_path, monk
     )
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     report = run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, False, None, tmp_path,
+        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, None, tmp_path,
         chain_override=chain,
     )
 
@@ -158,8 +157,9 @@ def test_forward_chain_snapshot_is_disclosed_and_passed_to_broker(tmp_path, monk
 
 def test_option_panel_is_persisted_with_counterfactual_trades(tmp_path, monkeypatch):
     _seed_cache(tmp_path)
+    # Strikes straddle the ORB breakout entry (~502) so ITM/ATM/OTM variants all resolve.
     chain = ChainParams(
-        expirations=["20260617", "20260619"], strikes=[499.0, 500.0, 501.0]
+        expirations=["20260617", "20260619"], strikes=[501.0, 502.0, 503.0]
     )
     monkeypatch.setattr(
         "tajator.broker.backtest.ensure_option_bars",
@@ -169,7 +169,7 @@ def test_option_panel_is_persisted_with_counterfactual_trades(tmp_path, monkeypa
     )
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path / "logs")
     report = run_backtest(
-        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, False, None, tmp_path,
+        "SPY", DAY_WITH_TRADE, DAY_WITH_TRADE, settings, None, tmp_path,
         chain_override=chain, option_panel=True,
     )
 

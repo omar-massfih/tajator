@@ -37,7 +37,7 @@ def test_no_future_expiry_returns_none():
 
 
 def test_size_entry_respects_budget_and_max_contracts():
-    settings = Settings(_env_file=None)  # $500 budget, 4 contracts max
+    settings = Settings(_env_file=None, max_premium_usd=500, max_contracts=4)
     assert size_entry(1.0, settings) == 4  # $100 each -> capped by MAX_CONTRACTS
     assert size_entry(2.0, settings) == 2  # $200 each -> budget allows 2
     assert size_entry(6.0, settings) == 0  # $600 each -> unaffordable

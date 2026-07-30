@@ -9,16 +9,6 @@ from pydantic import BaseModel, Field
 
 Direction = Literal["call", "put"]
 
-PatternName = Literal[
-    "none",
-    "double_top",
-    "double_bottom",
-    "head_and_shoulders",
-    "inverse_head_and_shoulders",
-    "triangle_breakout_up",
-    "triangle_breakout_down",
-]
-
 
 class Bar(BaseModel):
     """One 1-minute equity bar, timestamped in US/Eastern."""
@@ -35,15 +25,6 @@ class Level(BaseModel):
     price: float
     kind: Literal["support", "resistance"]
     label: str  # e.g. "prev_day_low", "premarket_high", "double_top", "swing_low"
-
-
-class LevelWatch(BaseModel):
-    """One level as judged during pre-market prep."""
-
-    level: Level
-    tradable: bool
-    direction: Direction | None = None
-    note: str = ""
 
 
 class PriceActionFeatures(BaseModel):
@@ -165,16 +146,6 @@ class ExecutionQuality(BaseModel):
     breaches: list[str] = Field(default_factory=list)
 
 
-class MorningBriefing(BaseModel):
-    """Structured output of the pre-market prep LLM call. Planning only — no trade results from it."""
-
-    symbol: str
-    bias: Literal["bullish", "bearish", "neutral"]
-    watch_levels: list[LevelWatch]
-    cleanest_level: float | None = None
-    summary: str = Field(description="1-3 sentence overall read for the morning, journaled verbatim")
-
-
 class SetupCandidate(BaseModel):
     """Mechanically detected 'price approaching a level with speed' candidate."""
 
@@ -182,6 +153,7 @@ class SetupCandidate(BaseModel):
     level: Level
     distance: float  # dollars between current price and the level
     speed: float  # net move over the approach window, in dollars
+    stop_price: float | None = None  # detector-provided stop (ORB: opposite side of the range)
     note: str = ""
     regime: str = "unknown"
     quality_score: float = 0.0
@@ -222,33 +194,6 @@ class Decision(BaseModel):
     )
     confidence: Literal["low", "medium", "high"] = "low"
     reasoning: str = Field(description="Short chart-based justification, journaled verbatim")
-
-
-class PatternAnalysis(BaseModel):
-    """Structured chart read produced by the experimental pattern-data mode.
-
-    This is deliberately not an executable ``Decision``. The graph must first
-    validate direction, confirmation, and prices, then construct a normal
-    candidate that still passes the existing risk gate.
-    """
-
-    action: Literal["wait", "enter_call", "enter_put"] = "wait"
-    pattern: PatternName = "none"
-    status: Literal["none", "forming", "confirmed"] = "none"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    breakout_price: float | None = Field(
-        default=None,
-        description="Underlying price level whose completed-bar break confirms the pattern",
-    )
-    invalidation_price: float | None = Field(
-        default=None,
-        description="Underlying price that invalidates the pattern thesis",
-    )
-    evidence: list[str] = Field(
-        default_factory=list,
-        description="Two or fewer observable chart facts; no hidden indicators or news",
-    )
-    reasoning: str = Field(description="Concise visual assessment, journaled verbatim")
 
 
 class RiskVerdict(BaseModel):

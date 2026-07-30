@@ -1,5 +1,6 @@
 import sys
 from datetime import date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -11,80 +12,20 @@ from tajator.config import Settings
 from tajator.models import OptionQuote, SelectedContract
 
 
-def test_run_deterministic_flag_is_forwarded(monkeypatch):
+def test_run_dispatches_to_cmd_run(monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, "cmd_run", lambda args: seen.append(args.deterministic))
-    monkeypatch.setattr(sys, "argv", ["tajator", "run", "--deterministic"])
-    cli.main()
-    assert seen == [True]
-
-
-def test_run_defaults_to_deterministic_policy(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli, "cmd_run", lambda args: seen.append(args.deterministic))
+    monkeypatch.setattr(cli, "cmd_run", lambda args: seen.append(args))
     monkeypatch.setattr(sys, "argv", ["tajator", "run"])
     cli.main()
-    assert seen == [True]
+    assert len(seen) == 1
 
 
-def test_run_llm_flag_is_an_explicit_opt_in(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli, "cmd_run", lambda args: seen.append(args.deterministic))
-    monkeypatch.setattr(sys, "argv", ["tajator", "run", "--llm"])
-    cli.main()
-    assert seen == [False]
-
-
-def test_run_pattern_data_is_an_explicit_opt_in(monkeypatch):
-    seen = []
-    monkeypatch.setattr(
-        cli, "cmd_run",
-        lambda args: seen.append((args.deterministic, args.pattern_data)),
-    )
-    monkeypatch.setattr(sys, "argv", ["tajator", "run", "--pattern-data"])
-    cli.main()
-    assert seen == [(False, True)]
-
-
-def test_runtime_policy_metadata_labels_validation_compatibility():
-    settings = Settings(_env_file=None, symbols=["AAPL"])
-    deterministic = cli._runtime_policy_metadata(settings, True)
-    llm = cli._runtime_policy_metadata(settings, False)
-    pattern_data = cli._runtime_policy_metadata(settings, False, True)
-    assert deterministic["policy_mode"] == "deterministic"
-    assert deterministic["validation_compatible"] is True
-    assert deterministic["cohort_fingerprints"]["AAPL"]
-    assert llm["policy_mode"] == "llm"
-    assert llm["validation_compatible"] is False
-    assert llm["cohort_fingerprints"] == {}
-    assert pattern_data["policy_mode"] == "pattern_data"
-    assert pattern_data["validation_compatible"] is False
-
-
-def test_pattern_data_refuses_live_trading_before_connecting(monkeypatch):
-    settings = Settings(_env_file=None, trading_mode="live", ib_port=4001)
-    monkeypatch.setattr(cli, "load_settings", lambda: settings)
-
-    with pytest.raises(SystemExit, match="restricted to TRADING_MODE=paper"):
-        cli.cmd_run(SimpleNamespace(pattern_data=True, deterministic=False))
-
-
-def test_forward_latest_has_dedicated_default_client_id(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli, "cmd_forward_latest", lambda args: seen.append(args.client_id))
-    monkeypatch.setattr(
-        sys, "argv", ["tajator", "forward-latest", "--name", "cohort", "--symbol", "AAPL"]
-    )
-    cli.main()
-    assert seen == [117]
-
-
-def test_shadow_has_dedicated_default_client_id(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli, "cmd_shadow", lambda args: seen.append(args.client_id))
-    monkeypatch.setattr(sys, "argv", ["tajator", "shadow", "--symbol", "MSFT"])
-    cli.main()
-    assert seen == [116]
+def test_runtime_policy_metadata_describes_the_deterministic_orb_run():
+    settings = Settings(_env_file=None, symbols=["AAPL", "MSFT"])
+    meta = cli._runtime_policy_metadata(settings)
+    assert meta["policy_mode"] == "deterministic"
+    assert meta["strategy"] == "orb"
+    assert meta["symbols"] == ["AAPL", "MSFT"]
 
 
 def test_check_ib_has_dedicated_default_client_id(monkeypatch):
@@ -110,60 +51,6 @@ def test_check_ib_refuses_more_than_five_entry_samples(monkeypatch):
         cli.main()
 
 
-def test_strategy_compare_forwards_locked_report_paths(monkeypatch, tmp_path):
-    seen = []
-    baseline = tmp_path / "baseline.json"
-    candidate = tmp_path / "candidate.json"
-    monkeypatch.setattr(cli, "cmd_strategy_compare", lambda args: seen.append(args))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tajator", "strategy-compare", str(baseline), str(candidate),
-            "--min-trades", "250", "--only-change", "max_entry_to_stop_cents",
-            "--output", str(tmp_path / "comparison.json"),
-        ],
-    )
-    cli.main()
-    assert seen[0].baseline == baseline
-    assert seen[0].candidate == candidate
-    assert seen[0].min_trades == 250
-    assert seen[0].only_change == ["max_entry_to_stop_cents"]
-    assert seen[0].output == tmp_path / "comparison.json"
-
-
-def test_entry_data_report_forwards_fixed_evidence_scope(monkeypatch, tmp_path):
-    seen = []
-    journal = tmp_path / "diagnostics"
-    output = tmp_path / "audit.json"
-    monkeypatch.setattr(cli, "cmd_entry_data_report", lambda args: seen.append(args))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tajator", "entry-data-report", "--path", str(journal),
-            "--symbols", "AAPL,MSFT", "--output", str(output),
-        ],
-    )
-    cli.main()
-    assert seen[0].path == journal
-    assert seen[0].symbols == "AAPL,MSFT"
-    assert seen[0].output == output
-
-
-def test_forward_init_forwards_manifest_identity_without_tws(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cli, "cmd_forward_init", lambda args: seen.append(args))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["tajator", "forward-init", "--name", "aapl-panel-v4", "--symbol", "AAPL"],
-    )
-    cli.main()
-    assert seen[0].name == "aapl-panel-v4"
-    assert seen[0].symbol == "AAPL"
-
-
 def test_backtest_accepts_current_tws_chain_diagnostic_flag(monkeypatch):
     seen = []
     monkeypatch.setattr(cli, "cmd_backtest", lambda args: seen.append(args))
@@ -172,7 +59,7 @@ def test_backtest_accepts_current_tws_chain_diagnostic_flag(monkeypatch):
         "argv",
         [
             "tajator", "backtest", "--symbol", "AAPL", "--start", "2026-07-14",
-            "--end", "2026-07-14", "--no-llm", "--tws-chain-snapshot",
+            "--end", "2026-07-14", "--tws-chain-snapshot",
         ],
     )
     cli.main()

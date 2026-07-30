@@ -120,7 +120,8 @@ def test_stop_on_wrong_side_vetoes(settings):
 
 
 def test_stop_distance_outside_rule_vetoes(settings):
-    too_far = Decision(action="enter_call", level_price=499.0, stop_price=497.5, reasoning="x")
+    # 494.0 is $5 (500 cents) below the level — past the 400-cent ORB ceiling.
+    too_far = Decision(action="enter_call", level_price=499.0, stop_price=494.0, reasoning="x")
     assert not run_check(settings, too_far).approved
 
 
@@ -130,24 +131,14 @@ def test_missing_stop_vetoes(settings):
 
 
 def test_stop_band_is_configurable(settings, tmp_path):
-    # 80 cents: outside the default 20–60 rule, inside a widened 10–100 band.
-    far = Decision(action="enter_call", level_price=499.0, stop_price=498.2, reasoning="x")
-    assert not run_check(settings, far).approved
-    wide = Settings(
+    # 150 cents: inside the default 5–400 band, outside a tightened 5–100 band.
+    far = Decision(action="enter_call", level_price=499.0, stop_price=497.5, reasoning="x")
+    assert run_check(settings, far).approved
+    tight = Settings(
         _env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path,
-        stop_min_cents=10, stop_max_cents=100,
+        stop_min_cents=5, stop_max_cents=100,
     )
-    assert run_check(wide, far).approved
-
-
-def test_actual_entry_to_stop_risk_cap(settings):
-    settings.max_entry_to_stop_cents = 100
-    verdict = check(
-        GOOD_ENTRY, now=MIDDAY, position=None, trades_today=0,
-        candidates=[CANDIDATE], settings=settings, snapshot_price=499.8,
-    )
-    assert not verdict.approved
-    assert any("actual entry-to-stop risk" in v for v in verdict.violations)
+    assert not run_check(tight, far).approved
 
 
 def test_entry_blockers_clear_midday(settings):

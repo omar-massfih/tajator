@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -30,25 +29,12 @@ def _validate_tws_chain_snapshot(args, start, end, now: datetime) -> None:
         raise ValueError("--tws-chain-snapshot requires the current session to be complete")
 
 
-def _runtime_policy_metadata(
-    settings, deterministic: bool, pattern_data: bool = False,
-) -> dict:
-    """Journal enough identity to keep incompatible execution samples separate."""
-    from .backtest.forward import _definition, _source_fingerprint
-
+def _runtime_policy_metadata(settings) -> dict:
+    """Journal enough identity to describe the run."""
     return {
-        "policy_mode": (
-            "deterministic" if deterministic else
-            "pattern_data" if pattern_data else "llm"
-        ),
-        "validation_compatible": deterministic,
-        "source_fingerprint": _source_fingerprint(),
-        "cohort_fingerprints": {
-            symbol: _definition(symbol, settings)["fingerprint"]
-            for symbol in settings.symbols
-        } if deterministic else {},
+        "policy_mode": "deterministic",
+        "strategy": "orb",
         "symbols": settings.symbols,
-        "llm_model": None if deterministic else settings.llm_model,
     }
 
 
@@ -57,29 +43,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="live minute loop against IBKR (paper by default)")
-    run_policy = run.add_mutually_exclusive_group()
-    run_policy.add_argument(
-        "--deterministic", dest="decision_mode", action="store_const", const="deterministic",
-        default="deterministic",
-        help="use the frozen rule-follower (default; retained as an explicit compatibility flag)",
-    )
-    run_policy.add_argument(
-        "--llm", dest="decision_mode", action="store_const", const="llm",
-        help="opt into experimental LLM entry and management decisions",
-    )
-    run_policy.add_argument(
-        "--pattern-data", dest="decision_mode", action="store_const", const="pattern_data",
-        help="paper-only: classify numerical OHLCV/pivot data for confirmed pattern entries",
-    )
-    shadow = sub.add_parser(
-        "shadow",
-        help="run deterministic live-quote simulation against TWS — never places orders",
-    )
-    shadow.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
-    shadow.add_argument(
-        "--client-id", type=int, default=116,
-        help="dedicated TWS market-data client ID (default: 116)",
-    )
+
     check_ib = sub.add_parser(
         "check-ib", help="connectivity check: bars, chain, quote — no orders"
     )
@@ -91,7 +55,6 @@ def main() -> None:
         "--entry-samples", type=int, choices=range(1, 6), default=1,
         help="paired entry-data samples per symbol, 1-5 (recommended: 3)",
     )
-    sub.add_parser("prep", help="run pre-market prep now: levels + LLM briefing — no orders")
 
     test_order = sub.add_parser(
         "test-order",
@@ -113,12 +76,6 @@ def main() -> None:
     src.add_argument("--csv", type=Path, help="CSV of 1-min bars (ts,open,high,low,close,volume)")
     src.add_argument("--date", help="YYYY-MM-DD — fetch that day's bars from IB once")
     replay.add_argument("--symbol", default=None, help="defaults to the first configured SYMBOLS entry")
-    replay_policy = replay.add_mutually_exclusive_group()
-    replay_policy.add_argument("--no-llm", action="store_true", help="deterministic rule-follower instead of the LLM")
-    replay_policy.add_argument(
-        "--pattern-data", action="store_true",
-        help="classify numerical OHLCV/pivot data for confirmed pattern entries",
-    )
     replay.add_argument("--prev-high", type=float, default=None)
     replay.add_argument("--prev-low", type=float, default=None)
 
@@ -128,12 +85,6 @@ def main() -> None:
     backtest.add_argument("--symbol", default=None, help="defaults to the first configured SYMBOLS entry")
     backtest.add_argument("--start", required=True, help="YYYY-MM-DD")
     backtest.add_argument("--end", required=True, help="YYYY-MM-DD")
-    backtest_policy = backtest.add_mutually_exclusive_group()
-    backtest_policy.add_argument("--no-llm", action="store_true", help="deterministic rule-follower instead of the LLM")
-    backtest_policy.add_argument(
-        "--pattern-data", action="store_true",
-        help="classify historical numerical OHLCV/pivot data for confirmed pattern entries",
-    )
     backtest.add_argument("--cache-dir", type=Path, default=None, help="defaults to Settings.backtest_cache_dir")
     backtest.add_argument(
         "--skip-missing-option-data", action="store_true",
@@ -156,189 +107,20 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
-    strategy_compare = sub.add_parser(
-        "strategy-compare",
-        help="paired day-clustered comparison of baseline and candidate replays",
-    )
-    strategy_compare.add_argument("baseline", type=Path)
-    strategy_compare.add_argument("candidate", type=Path)
-    strategy_compare.add_argument("--min-trades", type=int, default=50)
-    strategy_compare.add_argument("--min-positive-month-ratio", type=float, default=0.6)
-    strategy_compare.add_argument(
-        "--only-change", action="append", default=[],
-        help="require this strategy setting to be the only change (repeatable)",
-    )
-    strategy_compare.add_argument("--output", type=Path, default=None)
-
-    audit = sub.add_parser(
-        "edge-audit",
-        help="audit whether a backtest is stable and out-of-sample enough to support an edge",
-    )
-    audit.add_argument("report", type=Path)
-    audit_role = audit.add_mutually_exclusive_group()
-    audit_role.add_argument(
-        "--validation-start",
-        help="YYYY-MM-DD split; only trades on/after this date are judged as holdout",
-    )
-    audit_role.add_argument(
-        "--validation-only", action="store_true",
-        help="declare the entire report a frozen out-of-sample validation run",
-    )
-    audit.add_argument("--min-trades", type=int, default=50)
-
-    forward_init = sub.add_parser(
-        "forward-init",
-        help="lock a prospective cohort definition before its first captured session",
-    )
-    forward_init.add_argument("--name", required=True, help="immutable cohort name")
-    forward_init.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
-
-    forward = sub.add_parser(
-        "forward-validate",
-        help="capture one completed TWS session into a frozen options-validation cohort",
-    )
-    forward.add_argument("--name", required=True, help="immutable cohort name")
-    forward.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
-    forward.add_argument("--date", required=True, help="completed session date, YYYY-MM-DD")
-    forward.add_argument("--cache-dir", type=Path, default=None)
-    forward.add_argument(
-        "--client-id", type=int, default=117,
-        help="dedicated read-only TWS API client ID (default: 117)",
-    )
-
-    latest = sub.add_parser(
-        "forward-latest",
-        help="discover and capture the latest completed TWS session into a frozen cohort",
-    )
-    latest.add_argument("--name", required=True, help="immutable cohort name")
-    latest.add_argument("--symbol", default=None, help="defaults to the first configured symbol")
-    latest.add_argument("--cache-dir", type=Path, default=None)
-    latest.add_argument("--client-id", type=int, default=117)
-    latest.add_argument("--lookback-days", type=int, default=7)
-
-    panel = sub.add_parser(
-        "option-panel-compare",
-        help="compare captured ITM/ATM/OTM and expiry variants at identical signal times",
-    )
-    panel.add_argument("report", type=Path)
-    panel.add_argument("--min-pairs", type=int, default=50)
-
-    calibration = sub.add_parser(
-        "execution-calibrate",
-        help="compare journaled paper fills with historical option-bar execution assumptions",
-    )
-    calibration.add_argument("journal", type=Path)
-    calibration.add_argument("--symbol", required=True)
-    calibration.add_argument("--cache-dir", type=Path, default=None)
-    calibration.add_argument("--client-id", type=int, default=117)
-    calibration.add_argument("--output", type=Path, default=None)
-
-    entry_data_report = sub.add_parser(
-        "entry-data-report",
-        help="audit paired no-order entry stream/snapshot latency evidence",
-    )
-    entry_data_report.add_argument("--path", type=Path, default=None)
-    entry_data_report.add_argument("--symbols", default="AAPL,MSFT")
-    entry_data_report.add_argument("--output", type=Path, default=None)
-
-    shadow_report = sub.add_parser(
-        "shadow-report",
-        help="build an edge-auditable report from no-order shadow journals",
-    )
-    shadow_report.add_argument(
-        "path", type=Path, help="shadow journal JSONL file or directory"
-    )
-    shadow_report.add_argument("--symbol", required=True)
-    shadow_report.add_argument("--output", type=Path, default=None)
-
-    tournament = sub.add_parser(
-        "historical-signal-tournament",
-        help="select and validate preregistered intraday signals on cached TWS stock bars",
-    )
-    tournament.add_argument("--cache-dir", type=Path, default=None)
-    tournament.add_argument("--output", type=Path, default=None)
-
-    followup = sub.add_parser(
-        "historical-signal-followup",
-        help="validate the preregistered opening-drive fade historical follow-up",
-    )
-    followup.add_argument("--cache-dir", type=Path, default=None)
-    followup.add_argument("--output", type=Path, default=None)
-
-    daily_fetch = sub.add_parser(
-        "historical-daily-fetch",
-        help="fetch long-run TWS daily stock bars for the preregistered swing study",
-    )
-    daily_fetch.add_argument(
-        "--symbols", default="AAPL,META,MSFT,SPY,AMZN,GOOGL,NVDA,QQQ"
-    )
-    daily_fetch.add_argument("--start", default="2017-01-01")
-    daily_fetch.add_argument("--end", default="2026-06-30")
-    daily_fetch.add_argument("--cache-dir", type=Path, default=None)
-    daily_fetch.add_argument("--client-id", type=int, default=117)
-
-    daily_tournament = sub.add_parser(
-        "historical-daily-tournament",
-        help="run the preregistered sequential swing-signal tournament",
-    )
-    daily_tournament.add_argument("--cache-dir", type=Path, default=None)
-    daily_tournament.add_argument("--output", type=Path, default=None)
-
-    focused = sub.add_parser(
-        "historical-aapl-focus",
-        help="run the preregistered AAPL-first temporal holdout on fresh TWS history",
-    )
-    focused.add_argument("--cache-dir", type=Path, default=Path("data/tws-focused"))
-    focused.add_argument("--output", type=Path, default=None)
-
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     if args.command == "run":
-        args.deterministic = args.decision_mode == "deterministic"
-        args.pattern_data = args.decision_mode == "pattern_data"
         cmd_run(args)
-    elif args.command == "shadow":
-        cmd_shadow(args)
     elif args.command == "check-ib":
         cmd_check_ib(args)
     elif args.command == "test-order":
         cmd_test_order(args)
-    elif args.command == "prep":
-        cmd_prep()
     elif args.command == "backtest":
         cmd_backtest(args)
     elif args.command == "backtest-compare":
         from .backtest.compare import print_comparison
         print_comparison(args.reports)
-    elif args.command == "strategy-compare":
-        cmd_strategy_compare(args)
-    elif args.command == "edge-audit":
-        cmd_edge_audit(args)
-    elif args.command == "forward-init":
-        cmd_forward_init(args)
-    elif args.command == "forward-validate":
-        cmd_forward_validate(args)
-    elif args.command == "forward-latest":
-        cmd_forward_latest(args)
-    elif args.command == "option-panel-compare":
-        cmd_option_panel_compare(args)
-    elif args.command == "execution-calibrate":
-        cmd_execution_calibrate(args)
-    elif args.command == "entry-data-report":
-        cmd_entry_data_report(args)
-    elif args.command == "shadow-report":
-        cmd_shadow_report(args)
-    elif args.command == "historical-signal-tournament":
-        cmd_historical_signal_tournament(args)
-    elif args.command == "historical-signal-followup":
-        cmd_historical_signal_followup(args)
-    elif args.command == "historical-daily-fetch":
-        cmd_historical_daily_fetch(args)
-    elif args.command == "historical-daily-tournament":
-        cmd_historical_daily_tournament(args)
-    elif args.command == "historical-aapl-focus":
-        cmd_historical_aapl_focus(args)
     else:
         cmd_replay(args)
 
@@ -368,25 +150,18 @@ def _ib_broker(settings=None, notifier=None):
 
 def cmd_run(args) -> None:
     from .graph.nodes import RuntimeContext
-    from .llm.decide import build_llm, build_pattern_llm
-    from .models import MorningBriefing
     from .runner import LiveRunner, TradingSession
     from .startup import check_execution_diagnostics, check_kill_switch, run_startup_checks
     from .state_store import StateStore
 
     settings = load_settings()
-    if args.pattern_data and settings.trading_mode != "paper":
-        sys.exit("--pattern-data is experimental and restricted to TRADING_MODE=paper")
     notifier = _notifier(settings)
     check_kill_switch(settings, notifier)
     check_execution_diagnostics(settings)
     settings, broker = _ib_broker(settings, notifier)
     journal = Journal(settings.log_dir)
     broker.journal = journal  # order timelines land next to the trade records
-    journal.write(
-        "policy_start", ts=broker.now(),
-        **_runtime_policy_metadata(settings, args.deterministic, args.pattern_data),
-    )
+    journal.write("policy_start", ts=broker.now(), **_runtime_policy_metadata(settings))
     store = StateStore(settings.state_file)
     try:
         # Refuse on resting orders or positions that persisted state cannot
@@ -395,26 +170,12 @@ def cmd_run(args) -> None:
     except SystemExit:
         broker.disconnect()
         raise
-    llm = prep_llm = pattern_llm = None
-    if not args.deterministic:
-        try:
-            # fail fast on a missing/invalid API key instead of waiting all day
-            llm = build_llm(settings.llm_model)
-            prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
-            if args.pattern_data:
-                pattern_llm = build_pattern_llm(settings.llm_model)
-        except Exception as exc:  # noqa: BLE001
-            broker.disconnect()
-            sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
     today = broker.now().date()
     sessions = [
         TradingSession(
             RuntimeContext(
                 settings=settings, broker=broker, journal=journal, symbol=symbol,
-                use_llm=not args.deterministic,
-                pattern_data=args.pattern_data,
-                notifier=notifier, _llm=llm, _prep_llm=prep_llm,
-                _pattern_llm=pattern_llm,
+                notifier=notifier,
             ),
             store=store,
             restored=adopted.get(symbol),
@@ -426,66 +187,6 @@ def cmd_run(args) -> None:
         LiveRunner(sessions).run()
     finally:
         broker.disconnect()
-
-
-def cmd_shadow(args) -> None:
-    """Run the production graph on live TWS data with a broker that cannot order."""
-    from .broker.shadow import ShadowBroker
-    from .graph.nodes import RuntimeContext
-    from .runner import LiveRunner, TradingSession
-    from .state_store import PersistedSession, StateStore
-
-    base = load_settings()
-    shadow_dir = base.log_dir / "shadow"
-    settings = base.model_copy(
-        update={
-            "ib_client_id": args.client_id,
-            "protective_stop_enabled": False,
-            "log_dir": shadow_dir,
-            "state_file": shadow_dir / "state.json",
-            "kill_switch_file": shadow_dir / "KILL",
-        }
-    )
-    _, market = _ib_broker(settings, NullNotifier())
-    journal = Journal(shadow_dir)
-    broker = ShadowBroker(market, settings, journal)
-    store = StateStore(settings.state_file)
-    symbol = (args.symbol or settings.symbols[0]).upper()
-    today = broker.now().date()
-    restored = None
-    try:
-        persisted = store.load()
-        if persisted is not None and persisted.trading_day == today:
-            restored = persisted.sessions.get(symbol)
-        elif persisted is not None:
-            # An overnight shadow position is deliberately not adopted: this
-            # strategy is intraday and a stale simulation must not contaminate
-            # a new session's evidence.
-            restored = PersistedSession()
-        journal.write(
-            "shadow_started", symbol=symbol, deterministic=True,
-            client_id=args.client_id, no_order_placed=True,
-        )
-        print(
-            "=== TAJATOR SHADOW | LIVE TWS DATA | DETERMINISTIC | NO ORDERS ===\n"
-            f"symbol: {symbol}  journal/state: {shadow_dir}"
-        )
-        session = TradingSession(
-            RuntimeContext(
-                settings=settings,
-                broker=broker,
-                journal=journal,
-                symbol=symbol,
-                use_llm=False,
-                notifier=NullNotifier(),
-            ),
-            store=store,
-            restored=restored,
-            day=today,
-        )
-        LiveRunner([session]).run()
-    finally:
-        market.disconnect()
 
 
 def _streaming_entry_market_diagnostic(broker, contract, timeout_s: float = 5.0):
@@ -777,39 +478,12 @@ def cmd_test_order(args) -> None:
         sys.exit(1)
 
 
-def cmd_prep() -> None:
-    from .graph.nodes import RuntimeContext
-    from .llm.decide import build_llm
-    from .models import MorningBriefing
-    from .runner import TradingSession
-
-    settings, broker = _ib_broker()
-    try:
-        llm = build_llm(settings.llm_model)
-        prep_llm = build_llm(settings.llm_model, output_model=MorningBriefing)
-    except Exception as exc:  # noqa: BLE001
-        broker.disconnect()
-        sys.exit(f"could not initialize LLM '{settings.llm_model}': {exc}")
-    journal = Journal(settings.log_dir)
-    try:
-        for symbol in settings.symbols:
-            ctx = RuntimeContext(
-                settings=settings, broker=broker, journal=journal, symbol=symbol,
-                _llm=llm, _prep_llm=prep_llm,
-            )
-            TradingSession(ctx).prep()
-        print("\nprep complete. No orders were placed.")
-    finally:
-        broker.disconnect()
-
-
 def cmd_replay(args) -> None:
     from .broker.stub import StubBroker
     from .graph.nodes import RuntimeContext
     from .runner import TradingSession
 
     settings = load_settings()
-    pattern_data = getattr(args, "pattern_data", False)
     symbol = args.symbol or settings.symbols[0]
     if args.csv:
         stub = StubBroker.from_csv(args.csv, args.prev_high, args.prev_low)
@@ -849,16 +523,15 @@ def cmd_replay(args) -> None:
         finally:
             ib.disconnect()
 
+    replay_journal = Journal(settings.log_dir / "replays")
     ctx = RuntimeContext(
         settings=settings,
         broker=stub,
         # crash recovery replays logs/journal-*.jsonl, so those files must
         # stay live-only — replay's synthetic fills go in their own directory
         # (backtest already isolates itself the same way)
-        journal=Journal(settings.log_dir / "replays"),
+        journal=replay_journal,
         symbol=symbol,
-        use_llm=not args.no_llm,
-        pattern_data=pattern_data,
     )
     TradingSession(ctx).run_replay(stub)
 
@@ -870,7 +543,6 @@ def cmd_backtest(args) -> None:
 
     # A cached-only research run must be genuinely offline; connecting to IB
     # would make the reproducible A/B gate depend on Gateway availability.
-    pattern_data = getattr(args, "pattern_data", False)
     if args.cached_only:
         settings, ib = load_settings(), None
     else:
@@ -885,27 +557,16 @@ def cmd_backtest(args) -> None:
     try:
         if args.tws_chain_snapshot:
             _validate_tws_chain_snapshot(args, start, end, datetime.now(ET))
-            from .backtest.data import ensure_underlying_bars
-            from .backtest.forward import session_quality
-
-            bars = ensure_underlying_bars(ib, symbol, start, cache_dir, refresh=True)
-            quality = session_quality(bars, start)
-            if not quality["complete"]:
-                raise ValueError(
-                    f"current TWS session is incomplete: {quality['rth_bars']} RTH bars, "
-                    f"last={quality['last']}"
-                )
             chain_override = ib.get_option_chain(symbol)
         report = run_backtest(
-            symbol, start, end, settings, use_llm=not args.no_llm, ib=ib, cache_dir=cache_dir,
+            symbol, start, end, settings, ib=ib, cache_dir=cache_dir,
             skip_missing_option_data=args.skip_missing_option_data,
             underlying_only=args.underlying_only,
             cached_only=args.cached_only,
             experiment=args.experiment,
             chain_override=chain_override,
-            pattern_data=pattern_data,
         )
-    except Exception as exc:  # noqa: BLE001 — e.g. bad LLM config; fail with a clean message
+    except Exception as exc:  # noqa: BLE001 — fail with a clean message
         if ib is not None:
             ib.disconnect()
         sys.exit(f"backtest failed: {exc}")
@@ -914,298 +575,3 @@ def cmd_backtest(args) -> None:
     print_summary(report)
 
 
-def cmd_edge_audit(args) -> None:
-    from datetime import date
-
-    from .backtest.audit import load_and_audit, print_audit
-
-    try:
-        validation_start = date.fromisoformat(args.validation_start) if args.validation_start else None
-        audit = load_and_audit(
-            args.report,
-            validation_start=validation_start,
-            validation_only=args.validation_only,
-            min_trades=args.min_trades,
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"edge audit failed: {exc}")
-    print_audit(audit)
-
-
-def cmd_forward_validate(args) -> None:
-    from datetime import date
-
-    from .backtest.forward import capture_forward_day
-
-    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
-    settings, ib = _ib_broker(settings)
-    symbol = (args.symbol or settings.symbols[0]).upper()
-    try:
-        day = date.fromisoformat(args.date)
-        record, cumulative = capture_forward_day(
-            name=args.name,
-            symbol=symbol,
-            day=day,
-            settings=settings,
-            ib=ib,
-            cache_dir=args.cache_dir or settings.backtest_cache_dir,
-        )
-    except (OSError, ValueError, RuntimeError) as exc:
-        sys.exit(f"forward validation failed: {exc}")
-    finally:
-        ib.disconnect()
-    print(f"captured {symbol} {day}: {record}")
-    print(f"cumulative validation report: {cumulative}")
-
-
-def cmd_forward_init(args) -> None:
-    from .backtest.forward import initialize_forward_cohort
-
-    settings = load_settings()
-    symbol = (args.symbol or settings.symbols[0]).upper()
-    try:
-        manifest_path = initialize_forward_cohort(
-            name=args.name, symbol=symbol, settings=settings,
-        )
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"forward initialization failed: {exc}")
-    definition = manifest["definition"]
-    print(
-        f"locked prospective cohort {manifest['name']} for {symbol}: "
-        f"config {definition['fingerprint']}, source {definition['source_fingerprint']}"
-    )
-    print(
-        f"created at: {manifest['created_at']}  "
-        f"eligible from: {manifest.get('eligible_from', 'legacy/unrestricted')}  "
-        f"captured days: {len(manifest['captured_days'])}"
-    )
-    print(f"manifest: {manifest_path}")
-
-
-def cmd_forward_latest(args) -> None:
-    from .backtest.forward import capture_forward_day, latest_completed_session
-
-    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
-    settings, ib = _ib_broker(settings)
-    symbol = (args.symbol or settings.symbols[0]).upper()
-    cache_dir = args.cache_dir or settings.backtest_cache_dir
-    try:
-        day = latest_completed_session(
-            symbol=symbol,
-            ib=ib,
-            cache_dir=cache_dir,
-            lookback_calendar_days=args.lookback_days,
-        )
-        record, cumulative = capture_forward_day(
-            name=args.name,
-            symbol=symbol,
-            day=day,
-            settings=settings,
-            ib=ib,
-            cache_dir=cache_dir,
-        )
-    except (OSError, ValueError, RuntimeError) as exc:
-        sys.exit(f"forward latest failed: {exc}")
-    finally:
-        ib.disconnect()
-    print(f"latest completed session: {symbol} {day}")
-    print(f"captured: {record}")
-    print(f"cumulative validation report: {cumulative}")
-
-
-def cmd_option_panel_compare(args) -> None:
-    from .backtest.audit import paired_panel_rows, print_option_panel
-
-    try:
-        report = json.loads(args.report.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        sys.exit(f"option panel comparison failed: {exc}")
-    try:
-        paired_panel_rows(report, min_pairs=args.min_pairs)
-    except ValueError as exc:
-        sys.exit(f"option panel comparison failed: {exc}")
-    print_option_panel(report, min_pairs=args.min_pairs)
-
-
-def cmd_strategy_compare(args) -> None:
-    from .backtest.audit import compare_strategy_reports, print_strategy_comparison
-
-    try:
-        baseline = json.loads(args.baseline.read_text())
-        candidate = json.loads(args.candidate.read_text())
-        result = compare_strategy_reports(
-            baseline,
-            candidate,
-            min_trades=args.min_trades,
-            min_positive_month_ratio=args.min_positive_month_ratio,
-            expected_config_changes=tuple(args.only_change),
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"strategy comparison failed: {exc}")
-    if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2))
-    print_strategy_comparison(result)
-    if args.output is not None:
-        print(f"paired comparison report: {args.output}")
-
-
-def cmd_execution_calibrate(args) -> None:
-    from .backtest.audit import calibrate_execution_journal, print_execution_calibration
-
-    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
-    settings, ib = _ib_broker(settings)
-    try:
-        calibration = calibrate_execution_journal(
-            args.journal,
-            symbol=args.symbol,
-            ib=ib,
-            cache_dir=args.cache_dir or settings.backtest_cache_dir,
-            settings=settings,
-        )
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
-        sys.exit(f"execution calibration failed: {exc}")
-    finally:
-        ib.disconnect()
-    output = args.output or (
-        settings.log_dir / "calibrations" /
-        f"{args.journal.stem}_{args.symbol.upper()}.json"
-    )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(calibration, indent=2))
-    print_execution_calibration(calibration)
-    print(f"calibration report: {output}")
-
-
-def cmd_shadow_report(args) -> None:
-    from .backtest.audit import build_shadow_report, print_shadow_report, write_report
-
-    try:
-        report = build_shadow_report(args.path, symbol=args.symbol)
-        output = args.output or (
-            args.path if args.path.is_dir() else args.path.parent
-        ) / f"{args.symbol.upper()}_shadow_report.json"
-        write_report(report, output)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"shadow report failed: {exc}")
-    print_shadow_report(report)
-    print(f"shadow report: {output}")
-
-
-def cmd_entry_data_report(args) -> None:
-    from .backtest.audit import audit_entry_market_data, print_entry_market_data_audit
-
-    settings = load_settings()
-    path = args.path or settings.log_dir / "diagnostics"
-    symbols = tuple(symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip())
-    output = args.output or settings.log_dir / "research" / "entry-market-data-audit.json"
-    try:
-        result = audit_entry_market_data(path, symbols=symbols)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, indent=2))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"entry data report failed: {exc}")
-    print_entry_market_data_audit(result)
-    print(f"entry market-data audit: {output}")
-
-
-def cmd_historical_signal_tournament(args) -> None:
-    from .backtest.historical_signals import (
-        print_tournament,
-        run_tournament,
-        write_tournament,
-    )
-
-    settings = load_settings()
-    cache_dir = args.cache_dir or settings.backtest_cache_dir
-    output = args.output or settings.log_dir / "research" / "historical-signal-tournament-v1.json"
-    try:
-        report = run_tournament(cache_dir)
-        write_tournament(report, output)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"historical signal tournament failed: {exc}")
-    print_tournament(report)
-    print(f"tournament report: {output}")
-
-
-def cmd_historical_signal_followup(args) -> None:
-    from .backtest.historical_signals import (
-        print_followup,
-        run_opening_drive_fade_followup,
-        write_tournament,
-    )
-
-    settings = load_settings()
-    cache_dir = args.cache_dir or settings.backtest_cache_dir
-    output = args.output or settings.log_dir / "research" / "opening-drive-fade-followup-v1.json"
-    try:
-        report = run_opening_drive_fade_followup(cache_dir)
-        write_tournament(report, output)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"historical signal follow-up failed: {exc}")
-    print_followup(report)
-    print(f"follow-up report: {output}")
-
-
-def cmd_historical_daily_fetch(args) -> None:
-    from datetime import date
-
-    from .backtest.daily_signals import fetch_daily_history
-
-    settings = load_settings().model_copy(update={"ib_client_id": args.client_id})
-    settings, ib = _ib_broker(settings)
-    cache_dir = args.cache_dir or settings.backtest_cache_dir
-    symbols = tuple(symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip())
-    try:
-        start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
-        if end < start:
-            raise ValueError("--end must not be before --start")
-        for symbol in symbols:
-            path = fetch_daily_history(ib, symbol, start, end, cache_dir)
-            print(f"cached {symbol}: {path}")
-    except (OSError, ValueError, RuntimeError) as exc:
-        sys.exit(f"historical daily fetch failed: {exc}")
-    finally:
-        ib.disconnect()
-
-
-def cmd_historical_daily_tournament(args) -> None:
-    from .backtest.daily_signals import (
-        print_daily_tournament,
-        run_daily_tournament,
-        write_daily_tournament,
-    )
-
-    settings = load_settings()
-    cache_dir = args.cache_dir or settings.backtest_cache_dir
-    output = args.output or settings.log_dir / "research" / "historical-daily-tournament-v1.json"
-    try:
-        report = run_daily_tournament(cache_dir)
-        write_daily_tournament(report, output)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"historical daily tournament failed: {exc}")
-    print_daily_tournament(report)
-    print(f"daily tournament report: {output}")
-
-
-def cmd_historical_aapl_focus(args) -> None:
-    from .backtest.daily_signals import (
-        print_aapl_focused,
-        run_aapl_focused_holdout,
-        write_daily_tournament,
-    )
-
-    settings = load_settings()
-    output = args.output or settings.log_dir / "research" / "aapl-focused-holdout-v1.json"
-    try:
-        report = run_aapl_focused_holdout(args.cache_dir)
-        write_daily_tournament(report, output)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        sys.exit(f"AAPL-focused historical holdout failed: {exc}")
-    print_aapl_focused(report)
-    print(f"AAPL-focused report: {output}")
-
-
-if __name__ == "__main__":
-    main()

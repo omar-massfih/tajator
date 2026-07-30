@@ -43,7 +43,7 @@ def run_failing_day(tmp_path, with_kill_switch):
     broker = FailingEntryBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
     broker.kill_switch_file = settings.kill_switch_file if with_kill_switch else None
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     sess = TradingSession(ctx)
     sess.run_replay(broker, verbose=False)
@@ -89,7 +89,7 @@ def test_failed_exit_keeps_position_and_keeps_retrying(tmp_path):
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
     broker = FailingExitBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     sess = TradingSession(ctx)
 

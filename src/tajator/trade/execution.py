@@ -47,9 +47,10 @@ def validate_entry_preflight(
     if underlying is None or underlying <= 0:
         return "no fresh underlying price for entry preflight"
 
+    # ORB: the breakout level (opening-range high for calls, low for puts) must
+    # still be held — the underlying should sit beyond it in our direction — and
+    # the fresh price must not have drifted far from the signal (no chasing).
     level = candidate.level.price
-    approach = settings.approach_band_pct * level
-    overshoot = settings.overshoot_band_pct * level
     drift_limit = max(
         settings.max_entry_drift_min_cents / 100,
         (snapshot.atr or 0.0) * settings.max_entry_drift_atr,
@@ -59,15 +60,15 @@ def validate_entry_preflight(
             return f"underlying {underlying:.2f} already crossed call stop {stop_price:.2f}"
         if underlying - snapshot.price > drift_limit:
             return f"call signal moved away by {underlying - snapshot.price:.2f}"
-        if not level - overshoot <= underlying <= level + approach:
-            return f"underlying {underlying:.2f} left support approach zone"
+        if underlying < level:
+            return f"underlying {underlying:.2f} fell back below breakout level {level:.2f}"
     else:
         if underlying >= stop_price:
             return f"underlying {underlying:.2f} already crossed put stop {stop_price:.2f}"
         if snapshot.price - underlying > drift_limit:
             return f"put signal moved away by {snapshot.price - underlying:.2f}"
-        if not level - approach <= underlying <= level + overshoot:
-            return f"underlying {underlying:.2f} left resistance approach zone"
+        if underlying > level:
+            return f"underlying {underlying:.2f} rose back above breakout level {level:.2f}"
     return None
 
 
@@ -170,12 +171,15 @@ def execute_entry(
         quality.underlying_signal = snapshot.price
     entry_equity_price = (
         quality.underlying_fill if quality is not None and quality.underlying_fill is not None
-        else preflight_underlying if preflight_underlying is not None else snapshot.price
+        else preflight_underlying if preflight_underlying is not None
+        else fill.equity_price if fill.equity_price is not None else snapshot.price
     )
     fill.equity_price = entry_equity_price
     fill.stop_price = decision.stop_price
     fill.regime = snapshot.regime
     fill.level_quality_score = candidate.quality_score if candidate is not None else 0.0
+    fill.level_label = candidate.level.label if candidate is not None else ""
+    fill.level_price = candidate.level.price if candidate is not None else decision.level_price
     # A reconciled partial fill returns fewer contracts than requested — the
     # plan must cover what the account actually holds, not what was asked for.
     plan = build_plan(
@@ -269,7 +273,7 @@ def execute_scale_out(
         quality = fill.execution_quality
         equity_price = (
             quality.underlying_fill if quality is not None and quality.underlying_fill is not None
-            else snapshot.price
+            else fill.equity_price if fill.equity_price is not None else snapshot.price
         )
         fill.equity_price = equity_price
         fill.exit_reason = reason
@@ -312,7 +316,7 @@ def execute_exit(
         quality = fill.execution_quality
         equity_price = (
             quality.underlying_fill if quality is not None and quality.underlying_fill is not None
-            else snapshot.price
+            else fill.equity_price if fill.equity_price is not None else snapshot.price
         )
         fill.equity_price = equity_price
         fill.exit_reason = reason

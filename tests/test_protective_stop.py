@@ -170,7 +170,7 @@ class PollBroker(StubBroker):
 def graph_setup(tmp_path, broker, qty=2, **settings_kwargs):
     settings = make_settings(tmp_path, **settings_kwargs)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     nodes = make_nodes(ctx)
     contract = SelectedContract(symbol="SPY", expiry="20260710", strike=499.0, right="C")
@@ -256,7 +256,7 @@ def test_full_replay_with_stops_enabled_leaves_none_outstanding(tmp_path):
     settings = make_settings(tmp_path)
     broker = StubBroker.from_csv(csv, prev_day_high=503.5, prev_day_low=497.0)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     sess = TradingSession(ctx)
     sess.run_replay(broker, verbose=False)

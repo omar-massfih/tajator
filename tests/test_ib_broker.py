@@ -20,6 +20,7 @@ def settings(tmp_path):
     return Settings(
         _env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path,
         fill_grace_s=0,  # no post-cancel wait in tests
+        max_premium_usd=500,  # keep the over-budget breach case meaningful
     )
 
 

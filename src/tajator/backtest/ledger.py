@@ -32,6 +32,10 @@ class TradeResult:
     underlying_points: float | None = None
     regime: str = "unknown"
     level_quality_score: float = 0.0
+    level_label: str = ""
+    level_price: float | None = None
+    entry_equity_price: float | None = None
+    underlying_return: float | None = None
 
 
 @dataclass
@@ -110,6 +114,7 @@ def _trades_for_day(
         )
         favorable = adverse = None
         underlying_points = None
+        underlying_return = None
         if fill.equity_price is not None and closed_qty:
             weighted_exit = sum(
                 s.equity_price * s.qty
@@ -120,6 +125,8 @@ def _trades_for_day(
             if priced_qty:
                 raw_move = weighted_exit / priced_qty - fill.equity_price
                 underlying_points = raw_move if contract.right == "C" else -raw_move
+                if fill.equity_price:
+                    underlying_return = underlying_points / fill.equity_price
         if fill.equity_price is not None and exit_ts is not None:
             trade_bars = [b for b in (bars or []) if entry_ts <= b.ts <= exit_ts]
             if trade_bars:
@@ -157,6 +164,10 @@ def _trades_for_day(
                 underlying_points=round(underlying_points, 4) if underlying_points is not None else None,
                 regime=fill.regime,
                 level_quality_score=fill.level_quality_score,
+                level_label=fill.level_label,
+                level_price=fill.level_price,
+                entry_equity_price=round(fill.equity_price, 4) if fill.equity_price is not None else None,
+                underlying_return=round(underlying_return, 8) if underlying_return is not None else None,
             )
         )
         i = j

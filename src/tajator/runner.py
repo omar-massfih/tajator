@@ -12,10 +12,7 @@ from .broker.stub import StubBroker
 from .graph.build import build_graph
 from .graph.nodes import RuntimeContext
 from .graph.state import AgentState
-from .llm.decide import decide_prep, format_prep_snapshot, no_llm_briefing
 from .market.indicators import build_snapshot
-from .market.levels import detect_levels
-from .market.timeframes import build_multi_timeframe_context
 from .models import OpenPosition
 from .state_store import PersistedSession, StateStore
 from .trade.execution import execute_exit
@@ -151,7 +148,7 @@ class TradingSession:
         if out.get("candidates"):
             pieces.append(f"{len(out['candidates'])} setup candidate(s)")
         if out.get("decision") is not None:
-            pieces.append(f"LLM: {out['decision'].action}")
+            pieces.append(f"decision: {out['decision'].action}")
         for a in out.get("actions", []):
             pieces.append(f"FILL {a.kind} {a.qty}x @ {a.premium:.2f}")
         if self.position is not None:
@@ -161,44 +158,17 @@ class TradingSession:
         print(f"[{snap.ts:%H:%M}] {snap.symbol} {snap.price:.2f}  {status}")
 
     def prep(self) -> None:
-        """One-shot pre-market prep: compute levels and (if enabled) an LLM briefing."""
+        """Pre-market prep is a no-op for ORB: the opening range only forms after
+        09:30 ET, so there is nothing to compute before the open."""
         ctx = self.ctx
-        bars = ctx.broker.get_bars(ctx.symbol)
-        if not bars:
-            log.warning("prep: no bars yet for %s — skipping", ctx.symbol)
-            return
-        prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
-        levels = detect_levels(
-            bars, prev_high, prev_low,
-            min_touch_separation=ctx.settings.double_min_touch_separation_bars,
-            min_pullback_pct=ctx.settings.double_min_pullback_pct,
-            swing_window=ctx.settings.swing_window_bars,
-            cluster_tol=ctx.settings.level_cluster_tol_pct,
-        )
-        snapshot = build_snapshot(ctx.symbol, bars)
-        settings = ctx.settings.for_symbol(ctx.symbol)
-        if settings.multi_timeframe_context:
-            multi = build_multi_timeframe_context(
-                bars, ctx.broker.get_daily_bars(ctx.symbol), snapshot.ts, snapshot.price,
-            )
-            snapshot = snapshot.model_copy(update={"multi_timeframe": multi})
-        if ctx.use_llm:
-            text = format_prep_snapshot(ctx.symbol, snapshot, levels)
-            briefing = decide_prep(ctx.prep_llm, ctx.symbol, levels, text)
-        else:
-            briefing = no_llm_briefing(ctx.symbol, levels, "prep run with --no-llm")
         ctx.journal.write(
-            "pre_market_prep", ts=snapshot.ts, symbol=ctx.symbol, levels=levels, briefing=briefing
+            "pre_market_prep", symbol=ctx.symbol,
+            note=f"ORB: waiting for the first {ctx.settings.orb_window_minutes}-minute opening range",
         )
-        self._print_prep(snapshot, briefing)
-
-    def _print_prep(self, snapshot, briefing) -> None:
-        print(f"\n=== {snapshot.symbol} pre-market prep @ {snapshot.ts:%H:%M} ET — price {snapshot.price:.2f} ===")
-        for w in briefing.watch_levels:
-            tag = "TRADABLE" if w.tradable else "reference"
-            direction = f" {w.direction}" if w.direction else ""
-            print(f"  {w.level.price:.2f}  {w.level.kind:<10} ({w.level.label})  [{tag}{direction}] {w.note}")
-        print(f"  bias: {briefing.bias}  |  {briefing.summary}")
+        print(
+            f"[{ctx.symbol}] ORB — waiting for the opening range "
+            f"(first {ctx.settings.orb_window_minutes} min after 09:30 ET)"
+        )
 
     def _flatten_position(self, kind: Literal["manual_exit"], reason: str) -> bool:
         """Force-close self.position via execute_exit; journals, notifies, persists.
@@ -332,12 +302,8 @@ class LiveRunner:
 
     def run(self) -> None:
         mode = self.sessions[0].ctx.settings.trading_mode.upper()
-        decisions = (
-            "PATTERN DATA" if self.sessions[0].ctx.pattern_data else
-            "LLM" if self.sessions[0].ctx.use_llm else "DETERMINISTIC"
-        )
         symbols = ", ".join(sess.ctx.symbol for sess in self.sessions)
-        banner = f"=== tajator | {symbols} | {mode} | {decisions} ==="
+        banner = f"=== tajator | {symbols} | {mode} | ORB ==="
         if mode == "LIVE":
             banner = f"\n{'!' * 60}\n!!! LIVE TRADING — REAL MONEY !!!\n{'!' * 60}\n" + banner
         print(banner)

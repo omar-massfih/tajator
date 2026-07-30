@@ -59,7 +59,7 @@ class StateStore:
         self._state.trading_day = trading_day
         self._state.updated_at = datetime.now(ET)
         self._state.sessions[symbol] = PersistedSession(
-            position=position, trades_today=trades_today
+            position=position, trades_today=trades_today,
         )
         self._write()
 

@@ -33,6 +33,8 @@ class Fill(BaseModel):
     exit_reason: str = ""
     regime: str = "unknown"
     level_quality_score: float = 0.0
+    level_label: str = ""
+    level_price: float | None = None
     execution_quality: ExecutionQuality | None = None
 
 

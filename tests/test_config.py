@@ -9,16 +9,11 @@ def test_symbols_defaults_to_spy():
     assert settings.symbols == ["SPY"]
 
 
-def test_aapl_frozen_candidate_is_the_source_default():
+def test_no_symbol_overrides_by_default():
     settings = Settings(_env_file=None)
-
-    aapl = settings.for_symbol("AAPL")
-    assert aapl.entry_confirmation == "touch_rejection"
-    assert aapl.max_entry_to_stop_cents == 100
-    assert aapl.no_new_entries_after.hour == 14
-    assert aapl.blocked_direction_regimes == ["put:trend_up"]
-
-    # The candidate is symbol-specific; unrelated symbols retain global rules.
+    # ORB is symbol-agnostic — every symbol resolves to the global settings.
+    assert settings.symbol_strategy_overrides == {}
+    assert settings.for_symbol("AAPL") is settings
     assert settings.for_symbol("MSFT") is settings
 
 
@@ -57,42 +52,25 @@ def test_paper_mode_accepts_tws_paper_port():
     assert settings.ib_port == 7497
 
 
-def test_level_quality_defaults_match_the_algorithm_constants():
-    from tajator.market.levels import (
-        CLUSTER_TOL,
-        DOUBLE_MIN_PULLBACK_PCT,
-        DOUBLE_MIN_TOUCH_SEPARATION_BARS,
-        SWING_WINDOW,
-    )
-    from tajator.market.setups import MIN_LEVEL_DIST_FROM_OPEN_PCT
-
+def test_orb_defaults():
     settings = Settings(_env_file=None)
-    assert settings.double_min_touch_separation_bars == DOUBLE_MIN_TOUCH_SEPARATION_BARS
-    assert settings.double_min_pullback_pct == DOUBLE_MIN_PULLBACK_PCT
-    assert settings.min_level_dist_from_open_pct == MIN_LEVEL_DIST_FROM_OPEN_PCT
-    assert settings.swing_window_bars == SWING_WINDOW
-    assert settings.level_cluster_tol_pct == CLUSTER_TOL
+    assert settings.orb_window_minutes == 15
+    assert settings.orb_breakout_buffer_pct == 0.0005
 
 
-def test_setup_and_stop_defaults_match_the_algorithm_constants():
-    from tajator.market.price_action import LONG_WICK_MIN_FRAC, REACTION_LOOKBACK_BARS
-    from tajator.market.setups import (
-        APPROACH_BAND,
-        MIN_SPEED_PCT,
-        OVERSHOOT_BAND,
-        SPEED_WINDOW,
-    )
+def test_stop_band_defaults_match_the_guardrail_constants():
     from tajator.risk.guardrails import STOP_MAX_CENTS, STOP_MIN_CENTS
 
     settings = Settings(_env_file=None)
-    assert settings.approach_band_pct == APPROACH_BAND
-    assert settings.overshoot_band_pct == OVERSHOOT_BAND
-    assert settings.speed_window_bars == SPEED_WINDOW
-    assert settings.min_speed_pct == MIN_SPEED_PCT
-    assert settings.reaction_lookback_bars == REACTION_LOOKBACK_BARS
-    assert settings.long_wick_min_frac == LONG_WICK_MIN_FRAC
     assert settings.stop_min_cents == STOP_MIN_CENTS
     assert settings.stop_max_cents == STOP_MAX_CENTS
+
+
+def test_raised_but_capped_sizing_defaults():
+    settings = Settings(_env_file=None)
+    assert settings.max_contracts == 10
+    assert settings.max_premium_usd == 2000.0
+    assert settings.max_trades_per_day == 2
 
 
 def test_guarded_execution_defaults():
@@ -108,39 +86,18 @@ def test_guarded_execution_defaults():
     assert settings.execution_live_confirmed is False
 
 
-def test_pattern_data_defaults_are_bounded_and_opt_in():
-    settings = Settings(_env_file=None)
-    assert settings.pattern_data_min_bars == 60
-    assert settings.pattern_data_lookback_bars == 120
-    assert settings.pattern_data_scan_interval_bars == 5
-    assert settings.pattern_data_min_confidence == 0.8
-    assert settings.pattern_data_max_chase_pct == 0.002
-
-
-def test_level_quality_fields_parse_env_strings():
+def test_orb_fields_parse_env_strings():
     settings = Settings(
         _env_file=None,
-        double_min_touch_separation_bars="15",
-        double_min_pullback_pct="0.003",
-        min_level_dist_from_open_pct="0.005",
-    )
-    assert settings.double_min_touch_separation_bars == 15
-    assert settings.double_min_pullback_pct == 0.003
-    assert settings.min_level_dist_from_open_pct == 0.005
-
-
-def test_setup_and_stop_fields_parse_env_strings():
-    settings = Settings(
-        _env_file=None,
-        approach_band_pct="0.005",
-        speed_window_bars="5",
+        orb_window_minutes="30",
+        orb_breakout_buffer_pct="0.001",
         stop_min_cents="10",
-        stop_max_cents="80",
+        stop_max_cents="200",
     )
-    assert settings.approach_band_pct == 0.005
-    assert settings.speed_window_bars == 5
+    assert settings.orb_window_minutes == 30
+    assert settings.orb_breakout_buffer_pct == 0.001
     assert settings.stop_min_cents == 10
-    assert settings.stop_max_cents == 80
+    assert settings.stop_max_cents == 200
 
 
 def test_backtest_execution_costs_must_be_nonnegative():
@@ -148,56 +105,29 @@ def test_backtest_execution_costs_must_be_nonnegative():
         Settings(_env_file=None, backtest_slippage_cents=-0.01)
 
 
-def test_symbol_strategy_override_resolves_without_mutating_global():
+def test_symbol_time_window_override_resolves_without_mutating_global():
     settings = Settings(
         _env_file=None,
-        entry_confirmation="immediate",
-        symbol_strategy_overrides={
-            "aapl": {
-                "entry_confirmation": "touch_rejection",
-                "max_entry_to_stop_cents": 90,
-                "no_new_entries_after": "14:00",
-                "blocked_direction_regimes": ["put:trend_up"],
-                "reaction_lookback_bars": 8,
-                "long_wick_min_frac": 0.4,
-            }
-        },
+        symbol_strategy_overrides={"aapl": {"no_new_entries_after": "14:00"}},
     )
     aapl = settings.for_symbol("AAPL")
-    assert aapl.entry_confirmation == "touch_rejection"
-    assert aapl.max_entry_to_stop_cents == 90
     assert aapl.no_new_entries_after.hour == 14
-    assert aapl.blocked_direction_regimes == ["put:trend_up"]
-    assert aapl.reaction_lookback_bars == 8
-    assert aapl.long_wick_min_frac == 0.4
-    assert settings.entry_confirmation == "immediate"
+    assert settings.no_new_entries_after.hour == 15  # global unchanged
     assert settings.for_symbol("MSFT") is settings
-
-
-def test_invalid_direction_regime_block_is_rejected():
-    with pytest.raises(ValidationError, match="invalid direction/regime"):
-        Settings(_env_file=None, blocked_direction_regimes=["put:sideways"])
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [{"reaction_lookback_bars": 1}, {"long_wick_min_frac": 1.1}],
-)
-def test_invalid_price_action_settings_are_rejected(kwargs):
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **kwargs)
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"pattern_data_min_bars": 9},
-        {"pattern_data_min_bars": 60, "pattern_data_lookback_bars": 59},
-        {"pattern_data_scan_interval_bars": 0},
-        {"pattern_data_min_confidence": 1.1},
-        {"pattern_data_max_chase_pct": 0},
+        {"orb_window_minutes": 0},
+        {"orb_breakout_buffer_pct": -0.001},
+        {"stop_min_cents": 0},
+        {"stop_max_cents": 0},
+        {"max_contracts": 0},
+        {"max_premium_usd": 0},
+        {"stop_min_cents": 100, "stop_max_cents": 50},
     ],
 )
-def test_invalid_pattern_data_settings_are_rejected(kwargs):
+def test_invalid_orb_settings_are_rejected(kwargs):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **kwargs)

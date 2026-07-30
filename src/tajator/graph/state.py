@@ -28,14 +28,12 @@ class AgentState(TypedDict, total=False):
     cooldown_levels: list[float]  # levels under a stop-out cooldown — not tradable
     # built by the graph
     bars: list[Bar]
-    daily_bars: list[Bar]
     prev_day_high: float | None
     prev_day_low: float | None
     snapshot: Snapshot
     levels: list[Level]
     candidates: list[SetupCandidate]
     entry_blockers: list[str]
-    pattern_scan_due: bool
     manage_action: ManageAction
     decision: Decision
     risk: RiskVerdict

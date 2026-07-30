@@ -78,7 +78,7 @@ def make_session(tmp_path, store=None, restored=None, day=None):
     settings = Settings(_env_file=None, kill_switch_file=tmp_path / "KILL", log_dir=tmp_path)
     broker = StubBroker.from_csv(CSV, prev_day_high=503.5, prev_day_low=497.0)
     ctx = RuntimeContext(
-        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY", use_llm=False
+        settings=settings, broker=broker, journal=Journal(tmp_path), symbol="SPY"
     )
     return TradingSession(ctx, store=store, restored=restored, day=day), broker
 

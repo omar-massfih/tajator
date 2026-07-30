@@ -80,6 +80,8 @@ def test_fees_and_trade_context_are_reported():
     buy.fee = 1.30
     buy.equity_price = 500.0
     buy.stop_price = 499.6
+    buy.level_label = "double_bottom"
+    buy.level_price = 499.8
     sell = fill(2, 2.50, 5)
     sell.fee = 1.30
     sell.equity_price = 500.8
@@ -98,6 +100,10 @@ def test_fees_and_trade_context_are_reported():
     assert trade.adverse_equity_move == 0.0
     assert trade.exit_reason == "first target"
     assert trade.underlying_points == 0.8
+    assert trade.entry_equity_price == 500.0
+    assert trade.underlying_return == 0.0016
+    assert trade.level_label == "double_bottom"
+    assert trade.level_price == 499.8
     assert report.gross_pnl == 100.0
     assert report.total_fees == 2.6
     assert report.metadata["execution_model"]["modeled"] is True
