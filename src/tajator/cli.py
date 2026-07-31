@@ -107,6 +107,18 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
+    dfetch = sub.add_parser(
+        "daily-fetch",
+        help="fetch long-run daily bars for a symbol universe (paced IB), cache for edge-search",
+    )
+    dfetch.add_argument("--symbols", default=None, help="comma-separated; defaults to the ~100-name universe")
+    dfetch.add_argument("--start", default="2017-01-01")
+    dfetch.add_argument("--end", default="2026-06-30")
+    dfetch.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
+    dfetch.add_argument("--pause", type=float, default=7.0, help="seconds between symbols to respect IB pacing")
+    dfetch.add_argument("--refresh", action="store_true", help="re-fetch symbols already cached")
+    dfetch.add_argument("--client-id", type=int, default=119, help="dedicated API client id")
+
     edge = sub.add_parser(
         "edge-search",
         help="test documented signals for a validated directional edge (offline, cached bars)",
@@ -149,6 +161,8 @@ def main() -> None:
         cmd_orb_sweep(args)
     elif args.command == "edge-search":
         cmd_edge_search(args)
+    elif args.command == "daily-fetch":
+        cmd_daily_fetch(args)
     else:
         cmd_replay(args)
 
@@ -628,6 +642,48 @@ def cmd_orb_sweep(args) -> None:
     print_sweep(result)
     path = write_sweep(result, settings.log_dir)
     print(f"\nwrote {path}")
+
+
+def cmd_daily_fetch(args) -> None:
+    import time as _t
+    from datetime import datetime as dt
+
+    from .backtest.data import _write_csv, fetch_daily_series
+    from .backtest.universe import DEFAULT_UNIVERSE
+
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols else DEFAULT_UNIVERSE
+    )
+    start = dt.strptime(args.start, "%Y-%m-%d").date()
+    end = dt.strptime(args.end, "%Y-%m-%d").date()
+    args.daily_dir.mkdir(parents=True, exist_ok=True)
+    settings, ib = _ib_broker(load_settings().model_copy(update={"ib_client_id": args.client_id}))
+    ok = skipped = failed = 0
+    try:
+        for i, sym in enumerate(symbols):
+            path = args.daily_dir / f"{sym}.csv"
+            if path.exists() and not args.refresh:
+                skipped += 1
+                continue
+            try:
+                bars = fetch_daily_series(ib, sym, start, end)
+            except Exception as exc:  # noqa: BLE001 — keep fetching the rest of the universe
+                print(f"[{sym}] fetch failed: {exc}")
+                failed += 1
+                _t.sleep(args.pause)
+                continue
+            if bars:
+                _write_csv(path, bars)
+                ok += 1
+                print(f"[{i + 1}/{len(symbols)}] {sym}: {len(bars)} daily bars")
+            else:
+                print(f"[{sym}] no bars returned")
+                failed += 1
+            _t.sleep(args.pause)
+    finally:
+        ib.disconnect()
+    print(f"\ndaily-fetch done: {ok} fetched, {skipped} already cached, {failed} failed")
 
 
 def cmd_edge_search(args) -> None:

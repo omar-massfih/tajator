@@ -103,11 +103,13 @@ def fetch_daily_series(ib, symbol: str, start: date, end: date) -> list[Bar]:
     """One historical-data call for daily OHLC covering the whole window (plus a lookback pad),
     used to derive each day's *previous* session high/low without re-fetching per day."""
     pad_days = (end - start).days + 140
+    # IB rejects day-count durations over 365 days — express long windows in years.
+    duration = f"{pad_days // 365 + 1} Y" if pad_days > 365 else f"{pad_days} D"
     stop = datetime.combine(end, datetime.min.time(), tzinfo=ET).replace(hour=20)
     raw = ib.ib.reqHistoricalData(
         ib._underlying(symbol),
         endDateTime=stop,
-        durationStr=f"{pad_days} D",
+        durationStr=duration,
         barSizeSetting="1 day",
         whatToShow="TRADES",
         useRTH=True,
