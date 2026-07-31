@@ -187,3 +187,49 @@ def test_single_contract_ignores_ema9_and_exits_at_first_real_target():
     a = evaluate(pos, snap(500.56, ema9=500.52, ema50=500.5))
     assert a.kind == "scale_candidate" and a.target_ref == "ema50_vwap"
     assert len(pos.plan.pieces) == 1  # selling this piece closes the position
+
+
+# --- let_run exit mode -------------------------------------------------------
+
+def let_run_call(qty=4, entry=500.0, stop=499.0, target_r=3.0, trail=1.5):
+    plan = build_plan(
+        "call", 499.0, stop, entry, 2.0, qty,
+        exit_mode="let_run", target_r=target_r, trail_atr_mult=trail,
+    )
+    return OpenPosition(contract=CONTRACT, plan=plan, qty_remaining=qty, opened_at=TS)
+
+
+def snap_atr(price, atr=1.0):
+    return Snapshot(symbol="SPY", ts=TS, price=price, atr=atr)
+
+
+def test_let_run_plan_is_a_single_piece_with_an_r_multiple_target():
+    plan = let_run_call().plan
+    assert plan.pieces == [4] and plan.target_refs == ["runner"]
+    assert plan.target_price == 503.0  # entry 500 + 3R (R = 1.0)
+    assert plan.trail_atr_mult == 1.5
+
+
+def test_let_run_holds_before_target_and_before_1r():
+    pos = let_run_call()
+    # +0.5 in favor (< 1R), well below the 503 target, above the 499 stop.
+    assert evaluate(pos, snap_atr(500.5)).kind == "hold"
+
+
+def test_let_run_exits_at_the_r_multiple_target():
+    pos = let_run_call()
+    assert evaluate(pos, snap_atr(503.0)).kind == "runner_exit"
+
+
+def test_let_run_initial_stop_fires_before_profit():
+    pos = let_run_call()
+    assert evaluate(pos, snap_atr(498.9)).kind == "stop_exit"
+
+
+def test_let_run_trails_after_1r_and_exits_on_pullback():
+    pos = let_run_call()
+    update_extreme(pos, 502.0)  # ran to +2R; trail = 502 - 1.5*ATR = 500.5
+    # holds while price is above the 500.5 chandelier stop
+    assert evaluate(pos, snap_atr(501.0)).kind == "hold"
+    # pulls back through the trailing stop -> exit (locking in profit above entry)
+    assert evaluate(pos, snap_atr(500.4)).kind == "stop_exit"

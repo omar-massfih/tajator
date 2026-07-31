@@ -191,6 +191,9 @@ def execute_entry(
         qty=fill.qty,
         hod_at_entry=snapshot.hod,
         lod_at_entry=snapshot.lod,
+        exit_mode=settings.exit_mode,
+        target_r=settings.runner_target_r,
+        trail_atr_mult=settings.runner_trail_atr_mult,
     )
     position = OpenPosition(
         contract=contract, plan=plan, qty_remaining=fill.qty, opened_at=fill.ts

@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     symbols: Annotated[list[str], NoDecode] = ["SPY"]
     orb_window_minutes: int = 15  # opening range = first N minutes after 09:30 ET
     orb_breakout_buffer_pct: float = 0.0005  # close must clear the range by this fraction
+    # Entry-quality filters (0 disables). Fewer, higher-conviction breakouts.
+    orb_min_relative_volume: float = 0.0  # breakout-bar volume / mean session volume
+    orb_min_breakout_range_atr: float = 0.0  # breakout-bar range >= this x ATR
+    # Exit style: "scale" (scale out at ema50/vwap then hod/lod) or "let_run"
+    # (single position, trail an ATR chandelier stop toward a large R-multiple).
+    exit_mode: Literal["scale", "let_run"] = "scale"
+    runner_target_r: float = 3.0  # let_run target as a multiple of entry-to-stop risk
+    runner_trail_atr_mult: float = 1.5  # let_run trailing-stop distance in ATRs
     max_trades_per_day: int = 2
     max_contracts: int = 10  # raised (aggressive but capped)
     max_premium_usd: float = 2000.0  # raised (aggressive but capped)
@@ -164,6 +172,14 @@ class Settings(BaseSettings):
             raise ValueError("ORB_WINDOW_MINUTES must be at least 1")
         if self.orb_breakout_buffer_pct < 0:
             raise ValueError("ORB_BREAKOUT_BUFFER_PCT cannot be negative")
+        if self.orb_min_relative_volume < 0:
+            raise ValueError("ORB_MIN_RELATIVE_VOLUME cannot be negative")
+        if self.orb_min_breakout_range_atr < 0:
+            raise ValueError("ORB_MIN_BREAKOUT_RANGE_ATR cannot be negative")
+        if self.runner_target_r <= 0:
+            raise ValueError("RUNNER_TARGET_R must be positive")
+        if self.runner_trail_atr_mult <= 0:
+            raise ValueError("RUNNER_TRAIL_ATR_MULT must be positive")
         for name in (
             "max_option_spread_cents", "max_entry_drift_min_cents",
             "max_execution_slippage_cents", "execution_diagnostic_max_age_days",

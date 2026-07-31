@@ -46,14 +46,29 @@ def opening_range(bars: list[Bar], window_minutes: int) -> tuple[float, float] |
     return or_high, or_low
 
 
+def _session_bars(bars: list[Bar]) -> list[Bar]:
+    """Regular-session bars of the current day (>= 09:30 ET)."""
+    if not bars:
+        return []
+    day = bars[-1].ts.astimezone(ET).date()
+    return [b for b in bars if b.ts.astimezone(ET).date() == day and _session_minute(b.ts) >= 0]
+
+
 def detect_orb(
     bars: list[Bar],
     snapshot: Snapshot,
     *,
     window_minutes: int,
     breakout_buffer_pct: float,
+    min_relative_volume: float = 0.0,
+    min_breakout_range_atr: float = 0.0,
 ) -> list[SetupCandidate]:
     """Emit at most one breakout candidate once a completed bar closes beyond the range.
+
+    Optional entry-quality filters keep only high-conviction breakouts:
+    ``min_relative_volume`` requires the breakout bar's volume to exceed that
+    multiple of the mean session-bar volume, and ``min_breakout_range_atr``
+    requires its high-low range to be at least that multiple of the ATR.
 
     Re-entry churn is prevented downstream by ``entry_blockers`` (one position
     at a time, ``max_trades_per_day``), so this may fire on every breakout bar.
@@ -64,6 +79,19 @@ def detect_orb(
     or_high, or_low = rng
     price = snapshot.price  # latest completed-bar close
     buffer = breakout_buffer_pct * price
+
+    breakout_bar = bars[-1]
+    if min_relative_volume > 0:
+        session = _session_bars(bars)
+        vols = [b.volume for b in session if b.volume > 0]
+        mean_vol = (sum(vols) / len(vols)) if vols else 0.0
+        if mean_vol <= 0 or breakout_bar.volume < min_relative_volume * mean_vol:
+            return []
+    if min_breakout_range_atr > 0:
+        atr = snapshot.atr
+        bar_range = breakout_bar.high - breakout_bar.low
+        if atr is None or atr <= 0 or bar_range < min_breakout_range_atr * atr:
+            return []
 
     if price > or_high + buffer:
         return [

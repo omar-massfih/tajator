@@ -107,6 +107,19 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
+    sweep = sub.add_parser(
+        "orb-sweep",
+        help="search ORB variants on cached bars, validate the best out-of-sample (offline)",
+    )
+    sweep.add_argument("--symbols", default=None, help="comma-separated; defaults to SYMBOLS")
+    sweep.add_argument("--dev-start", required=True, help="YYYY-MM-DD")
+    sweep.add_argument("--dev-end", required=True, help="YYYY-MM-DD")
+    sweep.add_argument("--holdout-start", required=True, help="YYYY-MM-DD")
+    sweep.add_argument("--holdout-end", required=True, help="YYYY-MM-DD")
+    sweep.add_argument("--min-trades", type=int, default=30)
+    sweep.add_argument("--top-k", type=int, default=8)
+    sweep.add_argument("--cache-dir", type=Path, default=None)
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -121,6 +134,8 @@ def main() -> None:
     elif args.command == "backtest-compare":
         from .backtest.compare import print_comparison
         print_comparison(args.reports)
+    elif args.command == "orb-sweep":
+        cmd_orb_sweep(args)
     else:
         cmd_replay(args)
 
@@ -573,5 +588,32 @@ def cmd_backtest(args) -> None:
     if ib is not None:
         ib.disconnect()
     print_summary(report)
+
+
+def cmd_orb_sweep(args) -> None:
+    from datetime import datetime as dt
+
+    from .backtest.sweep import print_sweep, run_sweep, write_sweep
+
+    settings = load_settings()
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols else settings.symbols
+    )
+    cache_dir = args.cache_dir or settings.backtest_cache_dir
+    windows = {
+        name: dt.strptime(getattr(args, name.replace("-", "_")), "%Y-%m-%d").date()
+        for name in ("dev-start", "dev-end", "holdout-start", "holdout-end")
+    }
+    result = run_sweep(
+        symbols,
+        windows["dev-start"], windows["dev-end"],
+        windows["holdout-start"], windows["holdout-end"],
+        settings, cache_dir,
+        min_trades=args.min_trades, top_k=args.top_k,
+    )
+    print_sweep(result)
+    path = write_sweep(result, settings.log_dir)
+    print(f"\nwrote {path}")
 
 

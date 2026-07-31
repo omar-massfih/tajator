@@ -64,6 +64,9 @@ uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30
 uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
     --underlying-only --experiment baseline  # long-window stock-signal research
 uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_variant.json
+uv run tajator orb-sweep --symbols AAPL,MSFT \
+    --dev-start 2025-07-01 --dev-end 2026-02-28 \
+    --holdout-start 2026-03-01 --holdout-end 2026-07-13  # offline variant search + holdout
 uv run tajator run          # live minute loop (paper by default)
 uv run pytest               # full test suite
 ```
@@ -91,6 +94,11 @@ Key `.env` settings (see `.env.example` for the full list):
 - `SYMBOLS` — comma-separated watchlist (default `SPY`); each runs its own
   independent session sharing one IB connection and journal.
 - `ORB_WINDOW_MINUTES` (default 15), `ORB_BREAKOUT_BUFFER_PCT` (default 0.0005).
+- Entry-quality filters (default off): `ORB_MIN_RELATIVE_VOLUME`,
+  `ORB_MIN_BREAKOUT_RANGE_ATR` — only take high-volume, range-expansion breakouts.
+- `EXIT_MODE` — `scale` (default) or `let_run` (one position, ATR-chandelier trail
+  toward `RUNNER_TARGET_R`× risk; `RUNNER_TRAIL_ATR_MULT` sets the trail distance).
+  Tune these with `orb-sweep`, which validates the best variant out-of-sample.
 - `MAX_CONTRACTS` (default 10), `MAX_PREMIUM_USD` (default 2000) — raised but capped.
 - `MAX_TRADES_PER_DAY` (default 2), `NO_NEW_ENTRIES_BEFORE`/`AFTER`.
 - `STOP_MIN_CENTS`/`STOP_MAX_CENTS` (default 5/400) — the sane-distance band the

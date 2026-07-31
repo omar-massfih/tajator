@@ -162,6 +162,8 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             state["bars"], state["snapshot"],
             window_minutes=settings.orb_window_minutes,
             breakout_buffer_pct=settings.orb_breakout_buffer_pct,
+            min_relative_volume=settings.orb_min_relative_volume,
+            min_breakout_range_atr=settings.orb_min_breakout_range_atr,
         )
         if not candidates:
             return {"candidates": candidates}

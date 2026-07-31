@@ -210,6 +210,8 @@ def _code_revision() -> str | None:
 def _strategy_config(settings: Settings) -> dict:
     names = (
         "orb_window_minutes", "orb_breakout_buffer_pct",
+        "orb_min_relative_volume", "orb_min_breakout_range_atr",
+        "exit_mode", "runner_target_r", "runner_trail_atr_mult",
         "max_trades_per_day", "max_contracts", "max_premium_usd", "stop_buffer_cents",
         "no_new_entries_before", "no_new_entries_after", "atr_window_bars",
         "stop_min_cents", "stop_max_cents", "stop_cooldown_minutes", "runner_stop",

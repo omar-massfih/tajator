@@ -56,6 +56,27 @@ def test_orb_defaults():
     settings = Settings(_env_file=None)
     assert settings.orb_window_minutes == 15
     assert settings.orb_breakout_buffer_pct == 0.0005
+    assert settings.orb_min_relative_volume == 0.0
+    assert settings.orb_min_breakout_range_atr == 0.0
+    assert settings.exit_mode == "scale"
+    assert settings.runner_target_r == 3.0
+    assert settings.runner_trail_atr_mult == 1.5
+
+
+def test_let_run_exit_fields_parse_env_strings():
+    settings = Settings(
+        _env_file=None,
+        exit_mode="let_run",
+        runner_target_r="5",
+        runner_trail_atr_mult="2.0",
+        orb_min_relative_volume="1.3",
+        orb_min_breakout_range_atr="1.0",
+    )
+    assert settings.exit_mode == "let_run"
+    assert settings.runner_target_r == 5.0
+    assert settings.runner_trail_atr_mult == 2.0
+    assert settings.orb_min_relative_volume == 1.3
+    assert settings.orb_min_breakout_range_atr == 1.0
 
 
 def test_stop_band_defaults_match_the_guardrail_constants():
@@ -126,6 +147,10 @@ def test_symbol_time_window_override_resolves_without_mutating_global():
         {"max_contracts": 0},
         {"max_premium_usd": 0},
         {"stop_min_cents": 100, "stop_max_cents": 50},
+        {"orb_min_relative_volume": -0.1},
+        {"orb_min_breakout_range_atr": -0.1},
+        {"runner_target_r": 0},
+        {"runner_trail_atr_mult": 0},
     ],
 )
 def test_invalid_orb_settings_are_rejected(kwargs):

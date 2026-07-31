@@ -51,7 +51,33 @@ def build_plan(
     qty: int,
     hod_at_entry: float | None = None,
     lod_at_entry: float | None = None,
+    *,
+    exit_mode: Literal["scale", "let_run"] = "scale",
+    target_r: float = 3.0,
+    trail_atr_mult: float = 1.5,
 ) -> PositionPlan:
+    if exit_mode == "let_run":
+        # One position, no early scale-outs: ride a trailing ATR stop toward a
+        # fixed R-multiple target for positive skew.
+        risk = abs(entry_equity_price - stop_price)
+        target_price = (
+            entry_equity_price + target_r * risk if direction == "call"
+            else entry_equity_price - target_r * risk
+        )
+        return PositionPlan(
+            direction=direction,
+            level_price=level_price,
+            stop_price=stop_price,
+            entry_equity_price=entry_equity_price,
+            entry_premium=entry_premium,
+            total_qty=qty,
+            pieces=[qty],
+            target_refs=["runner"],
+            hod_at_entry=hod_at_entry,
+            lod_at_entry=lod_at_entry,
+            target_price=round(target_price, 2),
+            trail_atr_mult=trail_atr_mult,
+        )
     pieces = split_pieces(qty)
     refs = SCALE_REFS[: len(pieces) - 1] + ["runner"] if len(pieces) > 1 else [SCALE_REFS[0]]
     return PositionPlan(
@@ -100,6 +126,8 @@ def active_stop_price(position: OpenPosition) -> float:
 
 def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
     plan = position.plan
+    if plan.target_price is not None:  # let_run exit style
+        return _evaluate_let_run(position, snapshot)
     price = snapshot.price
     long = plan.direction == "call"
 
@@ -144,6 +172,39 @@ def evaluate(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
             kind="scale_candidate",
             target_ref=ref,
             reason=f"price {price} touched {ref} target {target:.2f}",
+        )
+    return ManageAction(kind="hold")
+
+
+def _evaluate_let_run(position: OpenPosition, snapshot: Snapshot) -> ManageAction:
+    """Single-position runner: an ATR chandelier trail toward a fixed R target."""
+    plan = position.plan
+    price = snapshot.price
+    long = plan.direction == "call"
+    risk = abs(plan.entry_equity_price - plan.stop_price)
+
+    # Initial mental stop until the trade has *reached* at least 1R in our
+    # favor (measured on the favorable extreme, so a pullback still trails),
+    # then an ATR chandelier from that extreme — never looser than break-even.
+    stop = plan.stop_price
+    atr = snapshot.atr
+    fav = position.favorable_extreme
+    trail_mult = plan.trail_atr_mult or 0.0
+    fav_move = _favorable_move(fav, plan) if fav is not None else 0.0
+    if risk > 0 and fav is not None and fav_move >= risk and atr and trail_mult > 0:
+        trail = fav - trail_mult * atr if long else fav + trail_mult * atr
+        stop = max(stop, plan.entry_equity_price, trail) if long else min(stop, plan.entry_equity_price, trail)
+
+    if price <= stop if long else price >= stop:
+        return ManageAction(
+            kind="stop_exit",
+            reason=f"equity {price} through trailing stop {stop:.2f} — exit runner",
+        )
+    target = plan.target_price
+    if (price >= target) if long else (price <= target):
+        return ManageAction(
+            kind="runner_exit",
+            reason=f"equity {price} reached target {target:.2f} — exit runner",
         )
     return ManageAction(kind="hold")
 

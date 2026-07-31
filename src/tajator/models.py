@@ -228,6 +228,10 @@ class PositionPlan(BaseModel):
     # plans persisted before these fields existed (falls back to the live value).
     hod_at_entry: float | None = None
     lod_at_entry: float | None = None
+    # let_run exit style only: a fixed R-multiple target and the ATR-chandelier
+    # trail distance. None on ordinary scale-out plans.
+    target_price: float | None = None
+    trail_atr_mult: float | None = None
 
 
 class ProtectiveStop(BaseModel):
