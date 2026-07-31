@@ -107,6 +107,17 @@ def main() -> None:
     compare = sub.add_parser("backtest-compare", help="compare experiment-safe backtest JSON reports")
     compare.add_argument("reports", nargs="+", type=Path)
 
+    edge = sub.add_parser(
+        "edge-search",
+        help="test documented signals for a validated directional edge (offline, cached bars)",
+    )
+    edge.add_argument("--symbols", default=None, help="comma-separated; defaults to the 8 daily-cached names")
+    edge.add_argument("--dev-end", default="2023-12-31", help="YYYY-MM-DD; dev period ends here")
+    edge.add_argument("--holdout-start", default="2024-01-01", help="YYYY-MM-DD; holdout begins here")
+    edge.add_argument("--horizon", choices=["daily", "intraday", "both"], default="daily")
+    edge.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
+    edge.add_argument("--cache-dir", type=Path, default=None, help="intraday cache; defaults to Settings.backtest_cache_dir")
+
     sweep = sub.add_parser(
         "orb-sweep",
         help="search ORB variants on cached bars, validate the best out-of-sample (offline)",
@@ -136,6 +147,8 @@ def main() -> None:
         print_comparison(args.reports)
     elif args.command == "orb-sweep":
         cmd_orb_sweep(args)
+    elif args.command == "edge-search":
+        cmd_edge_search(args)
     else:
         cmd_replay(args)
 
@@ -615,5 +628,58 @@ def cmd_orb_sweep(args) -> None:
     print_sweep(result)
     path = write_sweep(result, settings.log_dir)
     print(f"\nwrote {path}")
+
+
+def cmd_edge_search(args) -> None:
+    import json
+    from datetime import datetime as dt
+
+    from .backtest.option_economics import compare_expressions, realized_vol
+    from .backtest.signals import (
+        SIGNAL_HORIZON_DAYS, load_daily, print_report, run_edge_search,
+    )
+
+    settings = load_settings()
+    default_syms = ["AAPL", "AMZN", "GOOGL", "META", "MSFT", "NVDA", "QQQ", "SPY"]
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols else default_syms
+    )
+    intraday_dir = args.cache_dir or settings.backtest_cache_dir
+    result = run_edge_search(
+        symbols,
+        daily_dir=args.daily_dir,
+        intraday_dir=intraday_dir,
+        dev_end=dt.strptime(args.dev_end, "%Y-%m-%d").date(),
+        holdout_start=dt.strptime(args.holdout_start, "%Y-%m-%d").date(),
+        horizon=args.horizon,
+    )
+    print_report(result)
+
+    # Option economics for each survivor: does a small stock edge survive as options?
+    ref_bars = load_daily(args.daily_dir, symbols[0])
+    for r in (row for row in result["results"] if row["survives"]):
+        if not ref_bars:
+            break
+        s0 = ref_bars[-1].close
+        move = r["holdout"]["mean_bps"] / 1e4
+        econ = compare_expressions(
+            s0, move, SIGNAL_HORIZON_DAYS.get(r["signal"], 1), realized_vol(ref_bars),
+        )
+        print(
+            f"\noption economics for '{r['signal']}' (expected move {econ['expected_move_pct']}%, "
+            f"IV {econ['iv_annual_pct']}%, {econ['dte_days']}d option):"
+        )
+        print(f"  stock       net {econ['stock']['net_pct']:+.3f}%")
+        print(f"  ITM ~70Δ    net {econ['itm_option']['net_pct']:+.1f}%   (breakeven move {econ['itm_option']['breakeven_move_pct']}%)")
+        print(f"  ATM         net {econ['atm_option']['net_pct']:+.1f}%   (breakeven move {econ['atm_option']['breakeven_move_pct']}%)")
+        print(f"  debit spread net {econ['debit_spread']['net_pct']:+.1f}%")
+
+    out_dir = settings.log_dir / "research"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.now().strftime("%Y%m%dT%H%M%S")
+    out_path = out_dir / f"edge-search-{stamp}.json"
+    out_path.write_text(json.dumps(result, indent=2, default=str))
+    print(f"\nwrote {out_path}")
 
 
