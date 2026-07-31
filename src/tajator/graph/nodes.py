@@ -197,6 +197,16 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         if stop is None:  # defensive: fall back to a fixed buffer beyond the level
             buffer = settings.stop_buffer_cents / 100
             stop = c.level.price - buffer if c.direction == "call" else c.level.price + buffer
+        # Bounded risk: never place the stop further than stop_max_cents from the
+        # breakout level. A wide opening range would otherwise imply a huge
+        # far-side stop that the risk gate vetoes outright (see the 2026-07-31
+        # MSFT session — 63 breakouts, all vetoed). Capping keeps the entry
+        # tradable with controlled risk instead of skipping it entirely.
+        max_dist = settings.stop_max_cents / 100
+        if c.direction == "call":
+            stop = max(stop, c.level.price - max_dist)
+        else:
+            stop = min(stop, c.level.price + max_dist)
         decision = Decision(
             action=f"enter_{c.direction}", level_price=c.level.price, stop_price=round(stop, 2),
             confidence="medium", reasoning=f"rule-follower: {c.note}",
