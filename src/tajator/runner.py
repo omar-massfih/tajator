@@ -158,17 +158,14 @@ class TradingSession:
         print(f"[{snap.ts:%H:%M}] {snap.symbol} {snap.price:.2f}  {status}")
 
     def prep(self) -> None:
-        """Pre-market prep is a no-op for ORB: the opening range only forms after
-        09:30 ET, so there is nothing to compute before the open."""
+        """Light pre-market prep: the fade detects levels live each tick, so there
+        is nothing mandatory to compute before the open."""
         ctx = self.ctx
         ctx.journal.write(
             "pre_market_prep", symbol=ctx.symbol,
-            note=f"ORB: waiting for the first {ctx.settings.orb_window_minutes}-minute opening range",
+            note="S/R fade — prev-day/premarket levels are detected live at each tick",
         )
-        print(
-            f"[{ctx.symbol}] ORB — waiting for the opening range "
-            f"(first {ctx.settings.orb_window_minutes} min after 09:30 ET)"
-        )
+        print(f"[{ctx.symbol}] S/R fade — ready; levels detected live from the open")
 
     def _flatten_position(self, kind: Literal["manual_exit"], reason: str) -> bool:
         """Force-close self.position via execute_exit; journals, notifies, persists.

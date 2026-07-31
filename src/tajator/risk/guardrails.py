@@ -18,10 +18,8 @@ if TYPE_CHECKING:  # runtime import would be circular: config imports our consta
 ET = ZoneInfo("America/New_York")
 RTH_OPEN = time(9, 30)
 LEVEL_MATCH_TOL = 0.002  # decision level must be within 0.2% of a detected candidate's
-# ORB stops sit at the opposite side of the opening range, so the band is wide;
-# it stays a sanity ceiling, not the tight 20-60c of the retired fade strategy.
-STOP_MIN_CENTS = 5
-STOP_MAX_CENTS = 400
+STOP_MIN_CENTS = 20
+STOP_MAX_CENTS = 60
 STOP_COOLDOWN_MINUTES = 30  # a level that stopped us out is untradable this long
 
 
@@ -107,6 +105,19 @@ def check(
         )
 
     violations.extend(_stop_violations(decision, direction, settings))
+    if (
+        settings.max_entry_to_stop_cents is not None
+        and decision.stop_price is not None
+        and snapshot_price is not None
+    ):
+        # Candidate matching anchors the level; actual risk is measured from
+        # the current underlying price, not merely from level to stop.
+        matched_risk = abs(snapshot_price - decision.stop_price)
+        if matched_risk is not None and matched_risk > settings.max_entry_to_stop_cents / 100:
+            violations.append(
+                f"actual entry-to-stop risk {matched_risk:.2f} exceeds "
+                f"{settings.max_entry_to_stop_cents / 100:.2f} maximum"
+            )
 
     # MAX_PREMIUM_USD is enforced at execution: size_entry sizes the order down
     # to fit the budget and skips the entry if even one contract busts it.

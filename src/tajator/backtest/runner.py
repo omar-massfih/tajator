@@ -126,7 +126,7 @@ def run_backtest(
     resolved_config = _strategy_config(settings.for_symbol(symbol))
     metadata = {
         "policy_mode": "deterministic",
-        "strategy": "orb",
+        "strategy": "sr_fade",
         "code_revision": _code_revision(),
         "execution_model": {
             "price_source": "next option bar open (last bar close at EOD)",
@@ -209,9 +209,14 @@ def _code_revision() -> str | None:
 
 def _strategy_config(settings: Settings) -> dict:
     names = (
-        "orb_window_minutes", "orb_breakout_buffer_pct",
-        "orb_min_relative_volume", "orb_min_breakout_range_atr",
-        "exit_mode", "runner_target_r", "runner_trail_atr_mult",
+        "multi_timeframe_context",
+        "double_min_touch_separation_bars", "double_min_pullback_pct",
+        "min_level_dist_from_open_pct", "swing_window_bars", "level_cluster_tol_pct",
+        "approach_band_pct", "overshoot_band_pct", "speed_window_bars", "min_speed_pct",
+        "fast_approach_speed_mult", "rejection_wick_min_frac", "trade_flipped_levels",
+        "reaction_lookback_bars", "long_wick_min_frac", "entry_confirmation",
+        "opening_confirmation_until", "max_entry_to_stop_cents", "stop_atr_multiplier",
+        "allowed_regimes", "blocked_direction_regimes", "min_level_quality_score",
         "max_trades_per_day", "max_contracts", "max_premium_usd", "stop_buffer_cents",
         "no_new_entries_before", "no_new_entries_after", "atr_window_bars",
         "stop_min_cents", "stop_max_cents", "stop_cooldown_minutes", "runner_stop",

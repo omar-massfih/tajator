@@ -1,9 +1,10 @@
 """Graph nodes. Each is a closure over the RuntimeContext (broker, journal, settings).
 
-Every node is deterministic. The flat branch detects an Opening-Range Breakout
-and enters it; the position branch manages the trade with the fixed
-stop/scale/runner rules. (The node keys ``llm_decide``/``llm_manage`` are kept
-for graph-wiring stability; they no longer call any model.)
+Every node is deterministic: the flat branch detects a support/resistance fade
+setup (buy calls into support, puts into resistance) and enters into the level;
+the position branch manages with the fixed stop/scale/runner rules. (The node
+keys ``llm_decide``/``llm_manage`` are kept for graph-wiring stability; they no
+longer call any model.)
 """
 
 from __future__ import annotations
@@ -15,10 +16,13 @@ from ..broker.base import Broker, OrderFailed
 from ..config import Settings
 from ..journal import Journal
 from ..market.indicators import build_snapshot
-from ..market.orb import detect_orb
+from ..market.levels import detect_levels
+from ..market.setups import detect_candidates
+from ..market.timeframes import build_daily_context, build_five_minute_context, rank_candidates
 from ..models import (
     Decision,
     ExecutedAction,
+    MultiTimeframeContext,
 )
 from ..notify import Notifier, NullNotifier
 from ..risk import guardrails
@@ -40,6 +44,7 @@ class RuntimeContext:
     symbol: str
     notifier: Notifier = field(default_factory=NullNotifier)
     metrics: dict[str, int] = field(default_factory=dict)
+    _daily_context_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
@@ -48,8 +53,10 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def fetch_data(state: AgentState) -> dict:
         bars = ctx.broker.get_bars(ctx.symbol)
         prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
+        daily_bars = ctx.broker.get_daily_bars(ctx.symbol) if settings.multi_timeframe_context else []
         return {
             "bars": bars,
+            "daily_bars": daily_bars,
             "prev_day_high": prev_high,
             "prev_day_low": prev_low,
         }
@@ -59,8 +66,28 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         if not bars:
             raise RuntimeError("broker returned no bars (data farm down or market closed)")
         snapshot = build_snapshot(ctx.symbol, bars, atr_window=settings.atr_window_bars)
-        # ORB anchors on the opening range, not prev-day/premarket levels.
-        return {"snapshot": snapshot, "levels": []}
+        if settings.multi_timeframe_context:
+            cache_key = snapshot.ts.astimezone(guardrails.ET).date().isoformat()
+            daily = ctx._daily_context_cache.get(cache_key)
+            if daily is None:
+                daily = build_daily_context(
+                    state.get("daily_bars") or [], snapshot.ts, snapshot.price,
+                )
+                ctx._daily_context_cache = {cache_key: daily}
+            multi = MultiTimeframeContext(
+                enabled=True,
+                daily=daily,
+                five_minute=build_five_minute_context(bars),
+            )
+            snapshot = snapshot.model_copy(update={"multi_timeframe": multi})
+        levels = detect_levels(
+            bars, state.get("prev_day_high"), state.get("prev_day_low"),
+            min_touch_separation=settings.double_min_touch_separation_bars,
+            min_pullback_pct=settings.double_min_pullback_pct,
+            swing_window=settings.swing_window_bars,
+            cluster_tol=settings.level_cluster_tol_pct,
+        )
+        return {"snapshot": snapshot, "levels": levels}
 
     # ----- position-open branch ---------------------------------------------
 
@@ -124,8 +151,7 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         return {"manage_action": action}
 
     def llm_manage(state: AgentState) -> dict:
-        # Deterministic: a scale_candidate from manage_position always scales the
-        # current piece. (Node key kept for graph-wiring stability.)
+        # Deterministic: a scale_candidate from manage_position scales the piece.
         snapshot, action = state["snapshot"], state["manage_action"]
         decision = Decision(action="scale_out", reasoning=f"rule-follower: {action.reason}")
         ctx.journal.write("scale_decision", ts=snapshot.ts, symbol=ctx.symbol, mode="manage", decision=decision)
@@ -158,20 +184,89 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     # ----- flat branch --------------------------------------------------------
 
     def detect_setups(state: AgentState) -> dict:
-        candidates = detect_orb(
-            state["bars"], state["snapshot"],
-            window_minutes=settings.orb_window_minutes,
-            breakout_buffer_pct=settings.orb_breakout_buffer_pct,
-            min_relative_volume=settings.orb_min_relative_volume,
-            min_breakout_range_atr=settings.orb_min_breakout_range_atr,
+        now_et = state["snapshot"].ts.astimezone(guardrails.ET).time()
+        confirmation = settings.entry_confirmation
+        if settings.opening_confirmation_until and now_et < settings.opening_confirmation_until:
+            confirmation = "touch_rejection"
+        candidates = detect_candidates(
+            state["bars"], state["levels"], state["snapshot"],
+            min_dist_from_open_pct=settings.min_level_dist_from_open_pct,
+            approach_band=settings.approach_band_pct,
+            overshoot_band=settings.overshoot_band_pct,
+            speed_window=settings.speed_window_bars,
+            min_speed_pct=settings.min_speed_pct,
+            fast_approach_mult=settings.fast_approach_speed_mult,
+            rejection_wick_frac=settings.rejection_wick_min_frac,
+            reaction_lookback=settings.reaction_lookback_bars,
+            long_wick_min_frac=settings.long_wick_min_frac,
+            trade_flipped_levels=settings.trade_flipped_levels,
+            entry_confirmation=confirmation,
         )
+        candidates = rank_candidates(candidates, state["snapshot"].multi_timeframe)
+        if candidates:
+            ctx.journal.write(
+                "candidate_features", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                candidates=candidates, regime=state["snapshot"].regime,
+                atr=state["snapshot"].atr,
+                multi_timeframe=state["snapshot"].multi_timeframe,
+            )
+        filtered: list[tuple[Any, str]] = []
+        if settings.allowed_regimes:
+            kept = []
+            for c in candidates:
+                if c.regime in settings.allowed_regimes:
+                    kept.append(c)
+                else:
+                    filtered.append((c, f"regime {c.regime} not allowed"))
+            candidates = kept
+        if settings.blocked_direction_regimes:
+            blocked = set(settings.blocked_direction_regimes)
+            kept = []
+            for c in candidates:
+                key = f"{c.direction}:{c.regime}"
+                if key in blocked:
+                    filtered.append((c, f"direction/regime {key} blocked"))
+                else:
+                    kept.append(c)
+            candidates = kept
+        if settings.min_level_quality_score is not None:
+            kept = []
+            for c in candidates:
+                if c.quality_score >= settings.min_level_quality_score:
+                    kept.append(c)
+                else:
+                    filtered.append((c, f"quality {c.quality_score} below minimum"))
+            candidates = kept
+        if filtered:
+            for _, reason in filtered:
+                if reason.startswith("direction/regime"):
+                    key = "direction_regime"
+                else:
+                    key = "regime" if reason.startswith("regime") else "quality"
+                ctx.metrics[key] = ctx.metrics.get(key, 0) + 1
+            ctx.journal.write(
+                "strategy_filter_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                dropped=[{"candidate": c, "reason": reason} for c, reason in filtered],
+            )
+        # Levels under a stop-out cooldown are dropped before the LLM ever
+        # sees them — and since risk_gate only admits detected candidates,
+        # the LLM cannot re-enter them either.
+        candidates, cooled = guardrails.cooldown_filter(
+            candidates, state.get("cooldown_levels") or []
+        )
+        if cooled:
+            ctx.journal.write(
+                "cooldown_veto", ts=state["snapshot"].ts, symbol=ctx.symbol,
+                dropped=cooled, cooldown_levels=state.get("cooldown_levels"),
+            )
         if not candidates:
             return {"candidates": candidates}
         ctx.journal.write(
             "candidates", ts=state["snapshot"].ts, symbol=ctx.symbol,
             candidates=candidates, snapshot=state["snapshot"],
         )
-        # Cheap deterministic vetoes (kill switch, time window, trade count).
+        # Cheap deterministic vetoes (kill switch, time window, trade count)
+        # before paying for an LLM call that risk_gate would reject anyway.
         blockers = guardrails.entry_blockers(
             now=ctx.broker.now(),
             position=state.get("position"),
@@ -189,24 +284,17 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
         return {"candidates": candidates, "entry_blockers": blockers}
 
     def llm_decide(state: AgentState) -> dict:
-        # Deterministic entry: take the breakout candidate and use its stop
-        # (the opposite side of the opening range). Node key kept for wiring.
+        # Deterministic fade entry: take the top candidate and set the mental stop
+        # a buffer beyond the level (ATR-multiplier aware). Node key kept for wiring.
         snapshot, candidates = state["snapshot"], state["candidates"]
         c = candidates[0]
-        stop = c.stop_price
-        if stop is None:  # defensive: fall back to a fixed buffer beyond the level
-            buffer = settings.stop_buffer_cents / 100
-            stop = c.level.price - buffer if c.direction == "call" else c.level.price + buffer
-        # Bounded risk: never place the stop further than stop_max_cents from the
-        # breakout level. A wide opening range would otherwise imply a huge
-        # far-side stop that the risk gate vetoes outright (see the 2026-07-31
-        # MSFT session — 63 breakouts, all vetoed). Capping keeps the entry
-        # tradable with controlled risk instead of skipping it entirely.
-        max_dist = settings.stop_max_cents / 100
-        if c.direction == "call":
-            stop = max(stop, c.level.price - max_dist)
-        else:
-            stop = min(stop, c.level.price + max_dist)
+        buffer = settings.stop_buffer_cents / 100
+        if settings.stop_atr_multiplier is not None and snapshot.atr is not None:
+            buffer = min(
+                settings.stop_max_cents / 100,
+                max(settings.stop_min_cents / 100, snapshot.atr * settings.stop_atr_multiplier),
+            )
+        stop = c.level.price - buffer if c.direction == "call" else c.level.price + buffer
         decision = Decision(
             action=f"enter_{c.direction}", level_price=c.level.price, stop_price=round(stop, 2),
             confidence="medium", reasoning=f"rule-follower: {c.note}",

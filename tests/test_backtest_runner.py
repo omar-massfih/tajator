@@ -68,10 +68,11 @@ def test_run_backtest_across_days(tmp_path, monkeypatch):
     payload = json.loads(report_path.read_text())
     assert payload["metadata"]["experiment"] == "baseline"
     assert payload["metadata"]["policy_mode"] == "deterministic"
-    assert payload["metadata"]["strategy"] == "orb"
+    assert payload["metadata"]["strategy"] == "sr_fade"
     assert payload["metadata"]["execution_model"]["modeled_half_spread_pct"] == 0.01
-    assert "orb_window_minutes" in payload["metadata"]["strategy_config"]
-    assert payload["metadata"]["strategy_config"]["orb_window_minutes"] == 15
+    assert "approach_band_pct" in payload["metadata"]["strategy_config"]
+    assert payload["metadata"]["strategy_config"]["reaction_lookback_bars"] == 5
+    assert payload["metadata"]["strategy_config"]["long_wick_min_frac"] == 0.25
 
 
 def test_experiment_name_is_sanitized_in_output_path(tmp_path, monkeypatch):
@@ -157,9 +158,8 @@ def test_forward_chain_snapshot_is_disclosed_and_passed_to_broker(tmp_path, monk
 
 def test_option_panel_is_persisted_with_counterfactual_trades(tmp_path, monkeypatch):
     _seed_cache(tmp_path)
-    # Strikes straddle the ORB breakout entry (~502) so ITM/ATM/OTM variants all resolve.
     chain = ChainParams(
-        expirations=["20260617", "20260619"], strikes=[501.0, 502.0, 503.0]
+        expirations=["20260617", "20260619"], strikes=[499.0, 500.0, 501.0]
     )
     monkeypatch.setattr(
         "tajator.broker.backtest.ensure_option_bars",

@@ -61,9 +61,7 @@ def support_setup(underlying=499.2, quote=None):
 
 def test_guarded_entry_sizes_from_ask_plus_reserve():
     broker, snapshot, candidate, decision = support_setup()
-    settings = Settings(
-        _env_file=None, entry_budget_reserve_pct=0.05, max_premium_usd=500, max_contracts=4
-    )
+    settings = Settings(_env_file=None, entry_budget_reserve_pct=0.05)
     position, action, skip = execute_entry(
         broker, settings, decision, "call", snapshot, candidate
     )
@@ -161,7 +159,7 @@ def test_reserved_ask_can_skip_one_contract_before_market_order():
         quote=current_quote(bid=4.5, ask=4.8)
     )
     _, _, skip = execute_entry(
-        broker, Settings(_env_file=None, max_premium_usd=500), decision, "call", snapshot, candidate
+        broker, Settings(_env_file=None), decision, "call", snapshot, candidate
     )
     assert "reserves $504" in skip
     assert broker.fills == []
@@ -178,13 +176,11 @@ def test_entry_quote_request_failure_is_journaled_and_skipped():
     assert broker.preflights[0]["accepted"] is False
 
 
-def test_call_breakout_that_fell_back_below_the_level_is_skipped():
-    # underlying 498.9 is above the 498.6 stop but back below the 499.0 breakout
-    # level — the breakout failed, so ORB must not enter even with a huge drift limit.
-    broker, snapshot, candidate, decision = support_setup(underlying=498.9)
+def test_entry_outside_approach_zone_is_skipped_even_with_large_drift_limit():
+    broker, snapshot, candidate, decision = support_setup(underlying=500.6)
     settings = Settings(_env_file=None, max_entry_drift_min_cents=1000)
     _, _, skip = execute_entry(broker, settings, decision, "call", snapshot, candidate)
-    assert "fell back below breakout level" in skip
+    assert "left support approach zone" in skip
     assert broker.fills == []
 
 
