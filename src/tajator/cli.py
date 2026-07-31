@@ -130,6 +130,15 @@ def main() -> None:
     edge.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
     edge.add_argument("--cache-dir", type=Path, default=None, help="intraday cache; defaults to Settings.backtest_cache_dir")
 
+    mom = sub.add_parser(
+        "momentum-backtest",
+        help="monthly cross-sectional momentum stock basket — cost-aware, benchmark-relative (offline)",
+    )
+    mom.add_argument("--symbols", default=None, help="comma-separated; defaults to all cached daily names")
+    mom.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
+    mom.add_argument("--rebalance", type=int, default=21, help="trading days between rebalances")
+    mom.add_argument("--decile", type=float, default=0.1, help="top fraction to hold")
+
     sweep = sub.add_parser(
         "orb-sweep",
         help="search ORB variants on cached bars, validate the best out-of-sample (offline)",
@@ -163,6 +172,8 @@ def main() -> None:
         cmd_edge_search(args)
     elif args.command == "daily-fetch":
         cmd_daily_fetch(args)
+    elif args.command == "momentum-backtest":
+        cmd_momentum_backtest(args)
     else:
         cmd_replay(args)
 
@@ -684,6 +695,19 @@ def cmd_daily_fetch(args) -> None:
     finally:
         ib.disconnect()
     print(f"\ndaily-fetch done: {ok} fetched, {skipped} already cached, {failed} failed")
+
+
+def cmd_momentum_backtest(args) -> None:
+    from .backtest.momentum import print_momentum, run_momentum
+
+    if args.symbols:
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    else:
+        symbols = sorted(p.stem for p in args.daily_dir.glob("*.csv"))
+    result = run_momentum(
+        symbols, daily_dir=args.daily_dir, rebalance_days=args.rebalance, decile=args.decile,
+    )
+    print_momentum(result)
 
 
 def cmd_edge_search(args) -> None:
