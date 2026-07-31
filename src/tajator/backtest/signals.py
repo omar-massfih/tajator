@@ -20,8 +20,9 @@ we learn which stop actually helps rather than assuming.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
+from math import log
 from pathlib import Path
 from statistics import NormalDist, fmean, pstdev
 
@@ -38,6 +39,8 @@ SIGNAL_HORIZON_DAYS = {
     "overnight": 1, "intraday": 1, "reversal_1d": 1, "reversal_5d": 1,
     "momentum_ma20": 1, "momentum_ma200": 1, "turn_of_month": 3,
     "xs_reversal_1d": 1, "xs_reversal_5d": 1, "xs_momentum": 21,
+    "xs_lowvol": 21, "xs_highvol": 21, "xs_52w_high": 21,
+    "oversold": 3, "sell_in_may": 21,
     "gap_fill": 1, "first_hour_reversal": 1, "last_hour_drift": 1,
 }
 
@@ -148,9 +151,10 @@ DAILY_SIGNALS = {
 # symbol -> its sorted daily bars. Each day, rank the universe and trade a basket.
 # --------------------------------------------------------------------------- #
 
-def _xs_rank(series, lookback, horizon, decile, top):
-    """Long the top (or bottom) `decile` of the universe by trailing `lookback` return,
-    held `horizon` sessions. Ranking on day t uses only closes up to t."""
+def _xs_rank(series, score_fn, min_i, horizon, top, decile=XS_DECILE):
+    """Rank the universe each day by `score_fn(bars, i)` and long the top (or bottom)
+    `decile` as an equal-weight basket held `horizon` sessions. Causal: `score_fn`
+    may only look at bars up to index i."""
     idx = {s: {b.ts.date(): i for i, b in enumerate(bars)} for s, bars in series.items()}
     all_days = sorted({d for m in idx.values() for d in m})
     positions = []
@@ -158,31 +162,81 @@ def _xs_rank(series, lookback, horizon, decile, top):
         scored = []
         for s, bars in series.items():
             i = idx[s].get(d)
-            if i is None or i < lookback or i >= len(bars) - 1:
+            if i is None or i < min_i or i >= len(bars) - 1:
                 continue
-            scored.append((bars[i].close / bars[i - lookback].close - 1.0, s, i))
+            sc = score_fn(bars, i)
+            if sc is not None:
+                scored.append((sc, s, i))
         if len(scored) < 3:
             continue
-        scored.sort(reverse=top)  # top=True -> winners first; else losers first
+        scored.sort(reverse=top)  # top=True -> highest score first
         k = max(1, int(len(scored) * decile))
         for _, s, i in scored[:k]:
             positions.append(_long(series[s], i, s, i + horizon))
     return positions
 
 
+def _ret(lb):
+    return lambda b, i: b[i].close / b[i - lb].close - 1.0
+
+
+def _vol(w=60):
+    def f(b, i):
+        r = [log(b[j].close / b[j - 1].close) for j in range(i - w + 1, i + 1) if b[j - 1].close > 0]
+        return pstdev(r) if len(r) > 1 else None
+    return f
+
+
+def _near_52w_high(b, i):
+    hi = max(x.close for x in b[i - 252:i + 1])
+    return b[i].close / hi if hi > 0 else None
+
+
 def xs_reversal_1d(series):
-    return _xs_rank(series, lookback=1, horizon=1, decile=XS_DECILE, top=False)
+    return _xs_rank(series, _ret(1), 1, 1, top=False)
 
 
 def xs_reversal_5d(series):
-    return _xs_rank(series, lookback=5, horizon=1, decile=XS_DECILE, top=False)
+    return _xs_rank(series, _ret(5), 5, 1, top=False)
 
 
 def xs_momentum(series):
-    return _xs_rank(series, lookback=252, horizon=21, decile=XS_DECILE, top=True)
+    return _xs_rank(series, _ret(252), 252, 21, top=True)
 
 
-XS_SIGNALS = {"xs_reversal_1d": xs_reversal_1d, "xs_reversal_5d": xs_reversal_5d, "xs_momentum": xs_momentum}
+def xs_lowvol(series):          # low-volatility anomaly: long the calmest names
+    return _xs_rank(series, _vol(60), 60, 21, top=False)
+
+
+def xs_highvol(series):         # its opposite, to check the sign
+    return _xs_rank(series, _vol(60), 60, 21, top=True)
+
+
+def xs_52w_high(series):        # 52-week-high effect (George & Hwang)
+    return _xs_rank(series, _near_52w_high, 252, 21, top=True)
+
+
+XS_SIGNALS = {
+    "xs_reversal_1d": xs_reversal_1d, "xs_reversal_5d": xs_reversal_5d, "xs_momentum": xs_momentum,
+    "xs_lowvol": xs_lowvol, "xs_highvol": xs_highvol, "xs_52w_high": xs_52w_high,
+}
+
+
+# Two more per-symbol families: oversold mean-reversion and calendar seasonality.
+
+def sig_oversold(bars, symbol):
+    """Buy a >=5% 3-day drop, hold 3 sessions (oversold bounce)."""
+    return [_long(bars, i, symbol, i + 3) for i in range(3, len(bars) - 1)
+            if bars[i].close / bars[i - 3].close - 1 <= -0.05]
+
+
+def sig_sell_in_may(bars, symbol):
+    """Seasonality: long only the Nov-Apr 'good' months, ~21-day holds."""
+    return [_long(bars, i, symbol, i + 21) for i in range(1, len(bars) - 1)
+            if bars[i].ts.month in (11, 12, 1, 2, 3, 4) and bars[i - 1].ts.month != bars[i].ts.month]
+
+
+DAILY_SIGNALS.update({"oversold": sig_oversold, "sell_in_may": sig_sell_in_may})
 
 
 # --------------------------------------------------------------------------- #
