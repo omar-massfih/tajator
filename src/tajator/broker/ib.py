@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ib_async import IB, MarketOrder, Option, Stock
+from ib_async import IB, Contract, Index, MarketOrder, Option, Stock
 from ib_async.order import PriceCondition
 
 from ..config import Settings
@@ -52,7 +52,7 @@ class IBBroker(Broker):
         self.ib = IB()
         self.notifier = notifier or NullNotifier()
         self.journal: Journal | None = None  # set by callers that want order timelines
-        self._stocks: dict[str, Stock] = {}
+        self._stocks: dict[str, Contract] = {}  # stocks/ETFs + CBOE vol indices
         self._chain_cache: dict[str, tuple[str, ChainParams]] = {}
         self._daily_bars_cache: dict[str, tuple[str, list[Bar]]] = {}
         self._qualified: dict[str, Option] = {}
@@ -238,11 +238,17 @@ class IBBroker(Broker):
                 found.append(f"{pos.position:+g}x {c.secType} {c.localSymbol or c.symbol}")
         return found
 
-    def _underlying(self, symbol: str) -> Stock:
+    # CBOE volatility indices are secType=IND, not stocks — fetched for vol research.
+    _INDEX_SYMBOLS = {"VIX": "CBOE", "VIX3M": "CBOE"}
+
+    def _underlying(self, symbol: str) -> Contract:
         if symbol not in self._stocks:
-            stock = Stock(symbol, "SMART", "USD")
-            self.ib.qualifyContracts(stock)
-            self._stocks[symbol] = stock
+            if symbol in self._INDEX_SYMBOLS:
+                contract: Contract = Index(symbol, self._INDEX_SYMBOLS[symbol], "USD")
+            else:
+                contract = Stock(symbol, "SMART", "USD")
+            self.ib.qualifyContracts(contract)
+            self._stocks[symbol] = contract
         return self._stocks[symbol]
 
     # -- Broker interface -----------------------------------------------------------

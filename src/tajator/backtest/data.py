@@ -111,14 +111,19 @@ def fetch_daily_series(
     pad_days = (end - start).days + 140
     # IB rejects day-count durations over 365 days — express long windows in years.
     duration = f"{pad_days // 365 + 1} Y" if pad_days > 365 else f"{pad_days} D"
+    contract = ib._underlying(symbol)
+    # CBOE indices (VIX/VIX3M) serve historical levels under TRADES only (no
+    # ADJUSTED_LAST/MIDPOINT feed) — force it regardless of what the caller asked.
+    if getattr(contract, "secType", "") == "IND":
+        what_to_show = "TRADES"
     # IB rejects an explicit endDateTime with ADJUSTED_LAST — it only serves adjusted
-    # bars up to "now" (empty end). For TRADES we anchor the window at `end`.
+    # bars up to "now" (empty end). For TRADES/MIDPOINT we anchor the window at `end`.
     stop = (
         "" if what_to_show == "ADJUSTED_LAST"
         else datetime.combine(end, datetime.min.time(), tzinfo=ET).replace(hour=20)
     )
     raw = ib.ib.reqHistoricalData(
-        ib._underlying(symbol),
+        contract,
         endDateTime=stop,
         durationStr=duration,
         barSizeSetting="1 day",

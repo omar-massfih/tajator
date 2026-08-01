@@ -28,11 +28,17 @@ Extensive out-of-sample research in this repo reached a clear, tested conclusion
   underlying pts/trade), and every "improvement" that looked good in-sample (parameter
   sweeps, trend-alignment filters) **failed out-of-sample**. Option spread + theta then
   turns those coin-flips into net losers.
-- **The one edge that survived every gate is cross-sectional / time-series momentum in
-  *stocks*** — long the strongest-momentum names, ~monthly rebalance, validated across
-  112 symbols, unseen names, and hostile regimes (a ~10–14 %/yr *premium*, Sharpe ~0.8,
+- **The one directional edge that survived every gate is cross-sectional / time-series
+  momentum in *stocks*** — long the strongest-momentum names, ~monthly rebalance, validated
+  across 112 symbols, unseen names, and hostile regimes (a ~10–14 %/yr *premium*, Sharpe ~0.8,
   its magnitude inflated by survivorship). It is a **stock** strategy; a ~1 %/month edge
-  cannot be bought as options (see `edge-search` + `option-economics`).
+  cannot be bought as options (see `edge-search` + `option-economics`). Live via `momentum-rebalance`.
+- **The one *options-native* edge is the volatility risk premium** — implied vol (VIX) exceeds
+  realized vol ~85 % of days (~4 vol pts), so *selling* vol earns a carry. Naive short vol is a
+  death trap (SVXY lost ~91 % in Feb-2018); gating it on the **VIX term structure** (hold SVXY
+  only when VIX < VIX3M) tames the tail to a *survivable* ~35 % drawdown for ~13–18 %/yr on the
+  post-2018 instrument. It is a **risk premium** (payment for bearing crash risk), not free alpha —
+  Sharpe ~0.6. See `vol-edge-search`.
 
 The fade trades cleanly and is the default bot; the momentum toolkit is where a real,
 tradeable edge lives. Neither is a money printer — treat the numbers honestly.
@@ -82,8 +88,10 @@ uv run tajator backtest-compare logs/backtests/*_a.json logs/backtests/*_b.json
 Edge research (offline, on the cached daily/intraday bars):
 ```bash
 uv run tajator daily-fetch                       # paced IB fetch of ~100 names' daily bars
+uv run tajator daily-fetch --symbols VIX,VIX3M,VXX,SVXY --daily-dir data/historical/vol  # vol data
 uv run tajator edge-search --horizon daily       # test documented signals, OOS-validated
 uv run tajator momentum-backtest                 # monthly momentum stock basket, cost-aware
+uv run tajator vol-edge-search                   # volatility risk premium: term-structure short vol
 ```
 
 Live momentum basket (the one validated edge — a **stock** book, not options):

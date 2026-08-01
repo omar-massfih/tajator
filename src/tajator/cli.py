@@ -156,6 +156,16 @@ def main() -> None:
     reb.add_argument("--no-fetch", action="store_true", help="use cached daily bars instead of fetching fresh")
     reb.add_argument("--client-id", type=int, default=121, help="dedicated API client id")
 
+    vol = sub.add_parser(
+        "vol-edge-search",
+        help="volatility-risk-premium edge: term-structure-filtered short vol (SVXY), tail-stressed",
+    )
+    vol.add_argument("--vol-dir", type=Path, default=Path("data/historical/vol"),
+                     help="cache with VIX/VIX3M/SVXY daily bars (see daily-fetch)")
+    vol.add_argument("--spy-dir", type=Path, default=Path("data/historical/daily_adj"),
+                     help="adjusted daily cache providing SPY for the raw-VRP measure")
+    vol.add_argument("--cost-bps", type=float, default=5.0, help="cost per regime flip, one-way")
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -178,6 +188,8 @@ def main() -> None:
         cmd_momentum_backtest(args)
     elif args.command == "momentum-rebalance":
         cmd_momentum_rebalance(args)
+    elif args.command == "vol-edge-search":
+        cmd_vol_edge_search(args)
     else:
         cmd_replay(args)
 
@@ -816,6 +828,14 @@ def cmd_momentum_rebalance(args) -> None:
     finally:
         if broker is not None:
             broker.disconnect()
+
+
+def cmd_vol_edge_search(args) -> None:
+    from .backtest.vol_edge import print_report, run_vol_edge
+
+    spy_dir = args.spy_dir if (args.spy_dir / "SPY.csv").exists() else None
+    result = run_vol_edge(args.vol_dir, spy_dir=spy_dir, cost_bps=args.cost_bps)
+    print_report(result)
 
 
 def cmd_edge_search(args) -> None:
