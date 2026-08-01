@@ -86,6 +86,18 @@ uv run tajator edge-search --horizon daily       # test documented signals, OOS-
 uv run tajator momentum-backtest                 # monthly momentum stock basket, cost-aware
 ```
 
+Live momentum basket (the one validated edge — a **stock** book, not options):
+```bash
+uv run tajator momentum-rebalance --capital 100000 --offline   # preview from cache, no IB
+uv run tajator momentum-rebalance --capital 100000             # fetch fresh, show plan (dry-run)
+uv run tajator momentum-rebalance --capital 100000 --execute   # place paper stock orders
+```
+`momentum-rebalance` ranks the universe by 12-1 momentum, targets an equal-weight top-decile
+basket, reconciles it against current IB stock positions, and prints the order plan. It is
+**dry-run by default** (nothing is placed without `--execute`), paper-by-default, honours the
+KILL switch, fetches split/dividend-adjusted bars, and logs each run to
+`logs/rebalances/`. Run it ~monthly.
+
 `backtest`/`replay` step the *same* graph; `--underlying-only` reports direction-adjusted
 stock points (this account has no expired-option data, so that is the usable research mode).
 `edge-search` gates every signal on a temporal holdout, a cross-symbol holdout, a Bonferroni
@@ -119,4 +131,5 @@ Key `.env` settings (see `.env.example`):
 ## Out of scope
 
 Multi-symbol *options* scanning, dashboards, greeks/IV modeling, option spreads, limit
-orders, holiday calendar. Market orders only. (Multi-name momentum is stock-only research.)
+orders, holiday calendar. Market orders only. (The momentum basket trades **stocks**, not
+options — `momentum-rebalance` is a separate long-only book from the intraday options bot.)

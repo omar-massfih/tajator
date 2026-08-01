@@ -6,7 +6,7 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -139,6 +139,21 @@ def main() -> None:
     mom.add_argument("--rebalance", type=int, default=21, help="trading days between rebalances")
     mom.add_argument("--decile", type=float, default=0.1, help="top fraction to hold")
 
+    reb = sub.add_parser(
+        "momentum-rebalance",
+        help="rebalance a live (paper) stock account into the top-decile momentum basket",
+    )
+    reb.add_argument("--capital", type=float, required=True, help="dollars to deploy across the basket")
+    reb.add_argument("--symbols", default=None, help="comma-separated universe; defaults to the ~100-name list")
+    reb.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
+    reb.add_argument("--decile", type=float, default=0.10, help="top fraction to hold")
+    reb.add_argument("--lookback", type=int, default=252, help="momentum lookback in trading days")
+    reb.add_argument("--skip", type=int, default=21, help="most-recent days skipped (12-1 momentum)")
+    reb.add_argument("--execute", action="store_true", help="actually place market orders (default: dry-run)")
+    reb.add_argument("--offline", action="store_true", help="preview from cached bars only, no IB connection")
+    reb.add_argument("--no-fetch", action="store_true", help="use cached daily bars instead of fetching fresh")
+    reb.add_argument("--client-id", type=int, default=121, help="dedicated API client id")
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -159,6 +174,8 @@ def main() -> None:
         cmd_daily_fetch(args)
     elif args.command == "momentum-backtest":
         cmd_momentum_backtest(args)
+    elif args.command == "momentum-rebalance":
+        cmd_momentum_rebalance(args)
     else:
         cmd_replay(args)
 
@@ -666,6 +683,136 @@ def cmd_momentum_backtest(args) -> None:
         symbols, daily_dir=args.daily_dir, rebalance_days=args.rebalance, decile=args.decile,
     )
     print_momentum(result)
+
+
+def _stock_positions(broker) -> dict[str, int]:
+    """Current long stock share counts from the IB account, keyed by symbol."""
+    positions: dict[str, int] = {}
+    for p in broker.ib.reqPositions():
+        c = p.contract
+        if getattr(c, "secType", None) == "STK" and p.position:
+            positions[c.symbol] = positions.get(c.symbol, 0) + int(p.position)
+    return {s: q for s, q in positions.items() if q}
+
+
+def _place_stock_order(broker, symbol: str, action: str, qty: int, timeout: float = 30.0):
+    """Submit a stock market order and wait briefly for a terminal state."""
+    from ib_async import MarketOrder
+
+    stock = broker._underlying(symbol)
+    trade = broker.ib.placeOrder(stock, MarketOrder(action, qty))
+    deadline = time.time() + timeout
+    while time.time() < deadline and not trade.isDone():
+        broker.ib.waitOnUpdate(timeout=1.0)
+    fill_qty = int(sum(f.execution.shares for f in trade.fills))
+    avg = (
+        sum(f.execution.shares * f.execution.price for f in trade.fills) / fill_qty
+        if fill_qty else None
+    )
+    return trade.orderStatus.status, fill_qty, avg
+
+
+def cmd_momentum_rebalance(args) -> None:
+    import json
+
+    from .backtest.data import fetch_daily_series
+    from .backtest.signals import load_daily
+    from .backtest.universe import DEFAULT_UNIVERSE
+    from .rebalance import build_plan, compute_target, format_plan
+
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols else DEFAULT_UNIVERSE
+    )
+    settings = load_settings()
+
+    broker = None
+    if not args.offline:
+        _, broker = _ib_broker(settings.model_copy(update={"ib_client_id": args.client_id}))
+
+    try:
+        # --- daily bars: fresh from IB, or cached ---
+        if args.offline or args.no_fetch:
+            daily = {s: load_daily(args.daily_dir, s) for s in symbols}
+            daily = {s: b for s, b in daily.items() if b}
+            if not args.offline:
+                print("using cached daily bars (--no-fetch); momentum may be stale")
+        else:
+            start = datetime.now(ET).date() - timedelta(days=520)
+            end = datetime.now(ET).date()
+            daily = {}
+            print(f"fetching fresh daily bars for {len(symbols)} names (paced)…")
+            for i, sym in enumerate(symbols):
+                try:
+                    # ADJUSTED_LAST so splits/dividends don't fabricate momentum.
+                    bars = fetch_daily_series(broker, sym, start, end, what_to_show="ADJUSTED_LAST")
+                except Exception as exc:  # noqa: BLE001 — keep going, rank on what we have
+                    print(f"  [{sym}] fetch failed: {exc}")
+                    continue
+                if bars:
+                    daily[sym] = bars
+                if (i + 1) % 20 == 0:
+                    print(f"  …{i + 1}/{len(symbols)}")
+
+        target = compute_target(
+            daily, lookback=args.lookback, skip=args.skip, decile=args.decile,
+        )
+        if not target.members:
+            sys.exit("no target basket — not enough daily history for any name")
+
+        # --- prices (last close is the sizing reference; market order fills live) ---
+        prices = {s: daily[s][-1].close for s in target.members if s in daily}
+
+        # --- current holdings ---
+        current = {} if args.offline else _stock_positions(broker)
+        # make sure held names have a display price too
+        for s in current:
+            if s not in prices and s in daily:
+                prices[s] = daily[s][-1].close
+
+        plan = build_plan(target, current, prices, args.capital)
+        print("\n" + format_plan(plan))
+
+        log_dir = settings.log_dir / "rebalances"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "as_of": target.as_of.isoformat(),
+            "capital": args.capital,
+            "mode": settings.trading_mode,
+            "executed": False,
+            "members": target.members,
+            "scores": target.scores,
+            "orders": [
+                {"symbol": o.symbol, "action": o.action, "qty": o.qty, "ref_price": o.ref_price}
+                for o in plan.orders
+            ],
+        }
+
+        if not args.execute:
+            print("\nDRY-RUN — no orders placed. Re-run with --execute to trade.")
+        elif settings.kill_switch_file.exists():
+            print(f"\nKILL switch present ({settings.kill_switch_file}) — refusing to trade.")
+        elif not plan.orders:
+            print("\nAlready aligned — nothing to execute.")
+        else:
+            print(f"\nEXECUTING {len(plan.orders)} orders on the {settings.trading_mode} account…")
+            fills = []
+            for o in plan.orders:
+                status, filled, avg = _place_stock_order(broker, o.symbol, o.action, o.qty)
+                mark = "✓" if filled == o.qty else "⚠"
+                print(f"  {mark} {o.action:<4} {o.qty:>5} {o.symbol:<6} "
+                      f"{status} filled={filled}" + (f" @ {avg:.2f}" if avg else ""))
+                fills.append({"symbol": o.symbol, "action": o.action, "requested": o.qty,
+                              "status": status, "filled": filled, "avg_price": avg})
+            record["executed"] = True
+            record["fills"] = fills
+
+        out = log_dir / f"rebalance-{target.as_of.isoformat()}.json"
+        out.write_text(json.dumps(record, indent=2))
+        print(f"\nlogged → {out}")
+    finally:
+        if broker is not None:
+            broker.disconnect()
 
 
 def cmd_edge_search(args) -> None:

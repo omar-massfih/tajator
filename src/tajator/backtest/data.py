@@ -99,9 +99,15 @@ def ensure_underlying_bars(
     return bars
 
 
-def fetch_daily_series(ib, symbol: str, start: date, end: date) -> list[Bar]:
+def fetch_daily_series(
+    ib, symbol: str, start: date, end: date, *, what_to_show: str = "TRADES"
+) -> list[Bar]:
     """One historical-data call for daily OHLC covering the whole window (plus a lookback pad),
-    used to derive each day's *previous* session high/low without re-fetching per day."""
+    used to derive each day's *previous* session high/low without re-fetching per day.
+
+    `what_to_show` defaults to raw TRADES (correct for prev-day high/low); pass
+    "ADJUSTED_LAST" for split/dividend-adjusted closes, which long-horizon momentum
+    ranking needs (an unadjusted split otherwise fabricates a huge return)."""
     pad_days = (end - start).days + 140
     # IB rejects day-count durations over 365 days — express long windows in years.
     duration = f"{pad_days // 365 + 1} Y" if pad_days > 365 else f"{pad_days} D"
@@ -111,7 +117,7 @@ def fetch_daily_series(ib, symbol: str, start: date, end: date) -> list[Bar]:
         endDateTime=stop,
         durationStr=duration,
         barSizeSetting="1 day",
-        whatToShow="TRADES",
+        whatToShow=what_to_show,
         useRTH=True,
         formatDate=2,
     )
