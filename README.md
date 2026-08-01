@@ -4,21 +4,38 @@
 > Latin *mercator* ("merchant"), carrying the idea of trade, markets, and craft.
 
 A deterministic intraday options day-trader built with **LangGraph**, executing a
-classic **Opening-Range Breakout (ORB)** strategy through **Interactive Brokers**
-(paper account by default).
+**support/resistance fade** through **Interactive Brokers** (paper account by default),
+**plus** an offline research toolkit for hunting and out-of-sample-validating stock edges.
 
-The strategy in one line: after the first `ORB_WINDOW_MINUTES` of the regular
-session, lock the opening range `[or_low, or_high]`. When a completed 1-minute bar
-**closes above `or_high`** (plus a small buffer), buy **calls**; when it **closes
-below `or_low`**, buy **puts**. The stop is the opposite side of the range; the
-position scales out in pieces and rides a runner toward the high/low of day, and is
-force-flattened before the close (`RUNNER_STOP=first_target` restores the tighter
-lock at the first target). This is a *momentum* strategy — it enters *with* the
-move, above/below the level, not fading into it.
+The strategy in one line: buy **calls** as price falls *into* support and **puts** as
+price rises *into* resistance (prev-day / premarket highs & lows, qualified double
+tops/bottoms), with a mental stop ~40¢ beyond the level, scale out in pieces toward the
+50-EMA/VWAP then the high/low of day, and protect the runner at break-even. Discipline
+gates: an approach must have speed, a *very* fast approach must print a rejection wick,
+role-reversed levels stay chart context, and a stopped-out level is untradable for a
+cooldown. Per-symbol overrides tune it (AAPL ships a frozen touch-rejection/$1-risk-cap/
+14:00-cutoff policy).
 
-> **This is an experimental system for paper trading. Options trading involves
-> substantial risk of loss, and an all-or-nothing sizing policy maximizes the
-> probability of ruin. Do not point it at real money you cannot afford to lose.**
+> **Experimental, paper-only. Options trading involves substantial risk of loss.
+> Do not point it at real money you cannot afford to lose.**
+
+## Honest findings (what this project actually established)
+
+Extensive out-of-sample research in this repo reached a clear, tested conclusion:
+
+- **Intraday single-name options strategies have no durable edge here** — the S/R fade
+  and an Opening-Range Breakout both backtest at noise-level expectancy (~0.02–0.09
+  underlying pts/trade), and every "improvement" that looked good in-sample (parameter
+  sweeps, trend-alignment filters) **failed out-of-sample**. Option spread + theta then
+  turns those coin-flips into net losers.
+- **The one edge that survived every gate is cross-sectional / time-series momentum in
+  *stocks*** — long the strongest-momentum names, ~monthly rebalance, validated across
+  112 symbols, unseen names, and hostile regimes (a ~10–14 %/yr *premium*, Sharpe ~0.8,
+  its magnitude inflated by survivorship). It is a **stock** strategy; a ~1 %/month edge
+  cannot be bought as options (see `edge-search` + `option-economics`).
+
+The fade trades cleanly and is the default bot; the momentum toolkit is where a real,
+tradeable edge lives. Neither is a money printer — treat the numbers honestly.
 
 ## Design: deterministic, one path
 
@@ -27,104 +44,79 @@ fetch_data → compute_context ─┬─ (position open) → manage_position →
                               └─ (flat) → detect_setups → decide → risk_gate → enter
 ```
 
-- **`detect_setups`** computes the opening range and emits a breakout candidate
-  (`market/orb.py`). No breakout → nothing happens.
-- **`risk_gate`** (`risk/guardrails.py`) is a non-negotiable veto layer: market
-  hours, `MAX_TRADES_PER_DAY`, one position at a time, a stop on the correct side
-  within the configured cent band, and a kill-switch file.
-- **Sizing** caps each entry by `MAX_PREMIUM_USD` and `MAX_CONTRACTS` (raised but
-  finite — a single fill can't zero the account).
-- **Stops** (`trade/position.py`) are enforced in code on every tick: the mental
-  stop at the opposite side of the range, break-even protection after the first
-  scale-out, and a VWAP runner exit.
+- **`compute_context` / `detect_setups`** detect levels (`market/levels.py`) and
+  "price approaching a level with speed" candidates (`market/setups.py`), rank and
+  regime/quality/cooldown-filter them. No candidate → nothing happens. No LLM in the path.
+- **`risk_gate`** (`risk/guardrails.py`) is a non-negotiable veto: market hours,
+  `MAX_TRADES_PER_DAY`, one position at a time, the decision must match a *detected*
+  candidate, a stop on the correct side within the 20–60¢ band, an actual entry-to-stop
+  risk cap, and a kill-switch file.
+- **Stops** (`trade/position.py`) run in code every tick: mental stop beyond the level,
+  break-even after the first scale-out, VWAP runner exit; flat before the close.
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed automatically):
+Requires [uv](https://docs.astral.sh/uv/) (Python 3.12 installed automatically):
 
 ```bash
 uv sync
 cp .env.example .env   # then fill it in
 ```
 
-**IBKR:** install [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php),
-log into your **paper** account, and enable the API (Configure → API → Settings →
-*Enable ActiveX and Socket Clients*; port 4002 for paper, or 7497 for TWS paper).
+**IBKR:** install IB Gateway or TWS, log into your **paper** account, enable the API
+(port 4002 for IB Gateway paper, 7497 for TWS paper).
 
 ## Commands
 
+Live / diagnostics:
 ```bash
-uv run tajator check-ib     # connectivity check: bars, chain, quote — places NO orders
-uv run tajator test-order   # paper diagnostic: buy 1 lot, watch the fill timeline, sell it back
-uv run tajator test-order --with-stop   # + place/verify/cancel a protective stop mid-trade
+uv run tajator run          # live minute loop, S/R fade (paper by default)
+uv run tajator check-ib     # connectivity: bars, chain, quote — places NO orders
+uv run tajator test-order   # supervised paper diagnostic: buy 1 lot, watch fills, sell back
 uv run tajator replay --csv tests/data/spy_sample_day.csv --symbol SPY \
-    --prev-high 503.5 --prev-low 497.0   # bundled ORB day, no IB needed
-uv run tajator replay --date 2026-07-02          # fetch a real day from IB, replay it
-uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30
-uv run tajator backtest --symbol SPY --start 2026-04-01 --end 2026-06-30 \
-    --underlying-only --experiment baseline  # long-window stock-signal research
-uv run tajator backtest-compare logs/backtests/*_baseline.json logs/backtests/*_variant.json
-uv run tajator orb-sweep --symbols AAPL,MSFT \
-    --dev-start 2025-07-01 --dev-end 2026-02-28 \
-    --holdout-start 2026-03-01 --holdout-end 2026-07-13  # offline variant search + holdout
-uv run tajator run          # live minute loop (paper by default)
-uv run pytest               # full test suite
+    --prev-high 503.5 --prev-low 497.0   # bundled day, no IB needed
+uv run tajator backtest --symbol AAPL --start 2026-04-01 --end 2026-06-30 --underlying-only
+uv run tajator backtest-compare logs/backtests/*_a.json logs/backtests/*_b.json
 ```
 
-Everything is deterministic — there is no LLM in the trade path. `replay` steps the
-same graph through a recorded day with instant synthetic option fills (plumbing
-validation, not a backtest). `backtest` steps the same graph over a date range,
-fetching real underlying bars and, for every fill, the real historical option quote
-for that exact contract/day (cached under `data/historical/`); `--underlying-only`
-replays the identical detector against stock bars and reports direction-adjusted
-underlying points for long windows where IB no longer exposes expired options. Any
-position open at a recorded day's close is force-flattened so ledgers count every
-trade (live trading never auto-flattens; it warns and journals).
+Edge research (offline, on the cached daily/intraday bars):
+```bash
+uv run tajator daily-fetch                       # paced IB fetch of ~100 names' daily bars
+uv run tajator edge-search --horizon daily       # test documented signals, OOS-validated
+uv run tajator momentum-backtest                 # monthly momentum stock basket, cost-aware
+```
 
-`test-order` is the supervised acceptance check after any execution change. It uses
-the same quote validation, budget sizing, market-order timeout, fill reconciliation,
-and execution telemetry as production, then immediately sells the confirmed paper
-position. Live mode additionally requires a recent pass for every configured symbol
-plus `EXECUTION_LIVE_CONFIRMED=true`.
+`backtest`/`replay` step the *same* graph; `--underlying-only` reports direction-adjusted
+stock points (this account has no expired-option data, so that is the usable research mode).
+`edge-search` gates every signal on a temporal holdout, a cross-symbol holdout, a Bonferroni
+correction, and day-clustered errors; `option-economics` prices whether a signal survives as
+stock / ITM / ATM / spread. `test-order` is the supervised acceptance check before live.
 
 ## Configuration
 
-Key `.env` settings (see `.env.example` for the full list):
+Key `.env` settings (see `.env.example`):
 
-- `SYMBOLS` — comma-separated watchlist (default `SPY`); each runs its own
-  independent session sharing one IB connection and journal.
-- `ORB_WINDOW_MINUTES` (default 15), `ORB_BREAKOUT_BUFFER_PCT` (default 0.0005).
-- Entry-quality filters (default off): `ORB_MIN_RELATIVE_VOLUME`,
-  `ORB_MIN_BREAKOUT_RANGE_ATR` — only take high-volume, range-expansion breakouts.
-- `EXIT_MODE` — `scale` (default) or `let_run` (one position, ATR-chandelier trail
-  toward `RUNNER_TARGET_R`× risk; `RUNNER_TRAIL_ATR_MULT` sets the trail distance).
-  Tune these with `orb-sweep`, which validates the best variant out-of-sample.
-- `MAX_CONTRACTS` (default 10), `MAX_PREMIUM_USD` (default 2000) — raised but capped.
-- `MAX_TRADES_PER_DAY` (default 2), `NO_NEW_ENTRIES_BEFORE`/`AFTER`.
-- `STOP_MIN_CENTS`/`STOP_MAX_CENTS` (default 5/400) — the sane-distance band the
-  opposite-side stop must fall inside.
-- `RUNNER_STOP` — `breakeven` (default) or `first_target`.
-- `PROTECTIVE_STOP=true` also rests a GTC market sell at IB, triggered by the
-  underlying crossing the plan's stop — a backstop when tajator is down.
+- `SYMBOLS` — watchlist (currently `AAPL`; each runs an independent session).
+- Level/setup detection: `APPROACH_BAND_PCT`, `MIN_SPEED_PCT`, `REJECTION_WICK_MIN_FRAC`,
+  `DOUBLE_MIN_*`, `SWING_WINDOW_BARS`, `ENTRY_CONFIRMATION` (`immediate`/`touch_rejection`).
+- Stops: `STOP_MIN_CENTS`/`STOP_MAX_CENTS` (20/60), `STOP_ATR_MULTIPLIER`,
+  `MAX_ENTRY_TO_STOP_CENTS`, `STOP_COOLDOWN_MINUTES`, `RUNNER_STOP`.
+- Sizing: `MAX_CONTRACTS`, `MAX_PREMIUM_USD`, `MAX_TRADES_PER_DAY`, entry windows.
+- Filters (opt-in): `ALLOWED_REGIMES`, `BLOCKED_DIRECTION_REGIMES`, `MIN_LEVEL_QUALITY_SCORE`.
+- `SYMBOL_STRATEGY_OVERRIDES` — per-symbol tuning; AAPL ships a frozen policy by default.
+- `PROTECTIVE_STOP=true` rests a broker-side GTC stop as a backstop.
 
 ## Safety
 
-- Paper by default. Going live requires changing **both** `TRADING_MODE=live` and
-  `IB_PORT` to a live port (4001 for IB Gateway, 7496 for TWS) — one without the
-  other refuses to start; paper mode refuses to connect to any live port.
-- Operator-owned kill switch: `touch KILL` in the repo root blocks all new entries
-  immediately (existing positions are still managed and can exit). Tajator reads
-  this file but never creates it.
-- `run` refuses to start if the IB account already holds option positions in a
-  configured symbol — it only manages positions it opened itself.
-- If the IB connection drops, the loop reconnects on the next tick and journals it.
-- A partial, unconfirmed, or execution-quality-breaching order halts new entries
-  inside the running process and notifies the operator (without creating `KILL`).
-- Ctrl-C during `run` offers to flatten any open position.
-- Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`: snapshots, candidates,
-  decisions, risk vetoes, fills, quote preflights, order timelines, and execution quality.
+- Paper by default. Live requires changing **both** `TRADING_MODE=live` and `IB_PORT` to a
+  live port — one without the other refuses to start.
+- Kill switch: `touch KILL` blocks all new entries (open positions still managed). Tajator
+  reads it, never creates it.
+- `run` refuses to start on foreign option positions in a configured symbol.
+- A partial / unconfirmed / quality-breaching order halts new entries in-process.
+- Ctrl-C offers to flatten. Everything is journaled to `logs/journal-YYYY-MM-DD.jsonl`.
 
 ## Out of scope
 
-Multi-symbol scanning (the watchlist is a fixed list), dashboards, greeks/IV
-modeling, option-spread strategies, limit orders, holiday calendar. Market orders only.
+Multi-symbol *options* scanning, dashboards, greeks/IV modeling, option spreads, limit
+orders, holiday calendar. Market orders only. (Multi-name momentum is stock-only research.)
