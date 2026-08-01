@@ -117,6 +117,8 @@ def main() -> None:
     dfetch.add_argument("--daily-dir", type=Path, default=Path("data/historical/daily"))
     dfetch.add_argument("--pause", type=float, default=7.0, help="seconds between symbols to respect IB pacing")
     dfetch.add_argument("--refresh", action="store_true", help="re-fetch symbols already cached")
+    dfetch.add_argument("--adjusted", action="store_true",
+                        help="fetch split/dividend-adjusted closes (ADJUSTED_LAST) — correct for momentum")
     dfetch.add_argument("--client-id", type=int, default=119, help="dedicated API client id")
 
     edge = sub.add_parser(
@@ -653,7 +655,8 @@ def cmd_daily_fetch(args) -> None:
                 skipped += 1
                 continue
             try:
-                bars = fetch_daily_series(ib, sym, start, end)
+                what = "ADJUSTED_LAST" if args.adjusted else "TRADES"
+                bars = fetch_daily_series(ib, sym, start, end, what_to_show=what)
             except Exception as exc:  # noqa: BLE001 — keep fetching the rest of the universe
                 print(f"[{sym}] fetch failed: {exc}")
                 failed += 1
