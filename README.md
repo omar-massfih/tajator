@@ -52,7 +52,12 @@ fetch_data → compute_context ─┬─ (position open) → manage_position →
 
 - **`compute_context` / `detect_setups`** detect levels (`market/levels.py`) and
   "price approaching a level with speed" candidates (`market/setups.py`), rank and
-  regime/quality/cooldown-filter them. No candidate → nothing happens. No LLM in the path.
+  regime/quality/cooldown-filter them. No candidate → nothing happens.
+- **LLM level-planner (optional, `LLM_LEVELS=true`)** — the *only* place a model runs, and
+  it runs **once per day at the open**, never per tick: it reads the daily + premarket picture
+  and proposes the day's S/R levels (`llm/level_planner.py` via the Codex CLI), which are merged
+  ahead of the mechanical levels. On any failure it falls back to mechanical detection — it can
+  add information, never break the bot. Every trade *decision* downstream stays deterministic.
 - **`risk_gate`** (`risk/guardrails.py`) is a non-negotiable veto: market hours,
   `MAX_TRADES_PER_DAY`, one position at a time, the decision must match a *detected*
   candidate, a stop on the correct side within the 20–60¢ band, an actual entry-to-stop

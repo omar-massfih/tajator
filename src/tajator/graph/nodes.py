@@ -19,9 +19,12 @@ from ..market.indicators import build_snapshot
 from ..market.levels import detect_levels
 from ..market.setups import detect_candidates
 from ..market.timeframes import build_daily_context, build_five_minute_context, rank_candidates
+from ..llm.codex import CodexClient
+from ..llm.level_planner import plan_levels
 from ..models import (
     Decision,
     ExecutedAction,
+    Level,
     MultiTimeframeContext,
 )
 from ..notify import Notifier, NullNotifier
@@ -45,6 +48,23 @@ class RuntimeContext:
     notifier: Notifier = field(default_factory=NullNotifier)
     metrics: dict[str, int] = field(default_factory=dict)
     _daily_context_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+    _anchor_levels_cache: dict[str, list[Level]] = field(default_factory=dict, repr=False)
+    _llm_client: Any = field(default=None, repr=False)
+
+
+def _merge_anchor_levels(
+    anchors: list[Level], mechanical: list[Level], price: float, tol: float = 0.0015
+) -> list[Level]:
+    """LLM-planned anchor levels come first (kind recomputed against live price);
+    mechanical levels are appended only when not already covered by an anchor."""
+    merged = [
+        Level(price=a.price, kind="support" if a.price <= price else "resistance", label=a.label)
+        for a in anchors
+    ]
+    for m in mechanical:
+        if not any(abs(m.price - a.price) <= tol * price for a in anchors):
+            merged.append(m)
+    return merged
 
 
 def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
@@ -53,7 +73,8 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
     def fetch_data(state: AgentState) -> dict:
         bars = ctx.broker.get_bars(ctx.symbol)
         prev_high, prev_low = ctx.broker.get_prev_day_range(ctx.symbol)
-        daily_bars = ctx.broker.get_daily_bars(ctx.symbol) if settings.multi_timeframe_context else []
+        want_daily = settings.multi_timeframe_context or settings.llm_levels
+        daily_bars = ctx.broker.get_daily_bars(ctx.symbol) if want_daily else []
         return {
             "bars": bars,
             "daily_bars": daily_bars,
@@ -87,7 +108,31 @@ def make_nodes(ctx: RuntimeContext) -> dict[str, Any]:
             swing_window=settings.swing_window_bars,
             cluster_tol=settings.level_cluster_tol_pct,
         )
+        if settings.llm_levels:
+            levels = _merge_anchor_levels(
+                _anchor_levels(state, snapshot), levels, snapshot.price
+            )
         return {"snapshot": snapshot, "levels": levels}
+
+    def _anchor_levels(state: AgentState, snapshot) -> list[Level]:
+        """LLM-planned levels for the day, computed once at the first tick and cached."""
+        key = snapshot.ts.astimezone(guardrails.ET).date().isoformat()
+        if key not in ctx._anchor_levels_cache:
+            if ctx._llm_client is None:
+                ctx._llm_client = CodexClient(
+                    settings.llm_model or "codex", timeout_s=settings.llm_levels_timeout_s
+                )
+            planned = plan_levels(
+                ctx._llm_client, ctx.symbol, state.get("daily_bars") or [],
+                state.get("prev_day_high"), state.get("prev_day_low"),
+                state["bars"], snapshot.price,
+            )
+            ctx._anchor_levels_cache = {key: planned}  # one day at a time
+            ctx.journal.write(
+                "llm_levels", ts=snapshot.ts, symbol=ctx.symbol,
+                levels=[{"price": p.price, "kind": p.kind} for p in planned],
+            )
+        return ctx._anchor_levels_cache[key]
 
     # ----- position-open branch ---------------------------------------------
 

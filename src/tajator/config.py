@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     # Strategy
     symbols: Annotated[list[str], NoDecode] = ["SPY"]
     multi_timeframe_context: bool = False
+    # LLM daily level-planner: once per day at the open, an LLM reads the daily +
+    # premarket picture and proposes the day's S/R levels (the notes' "pick your
+    # own levels every morning"). It runs ONCE per day, never in the per-tick loop;
+    # on any failure the bot falls back to mechanical level detection.
+    llm_levels: bool = False
+    llm_model: str | None = None  # e.g. "codex" or "codex:gpt-5.3-codex"; None disables
+    llm_levels_timeout_s: int = 45
     max_trades_per_day: int = 2
     max_contracts: int = 4
     max_premium_usd: float = 500.0
