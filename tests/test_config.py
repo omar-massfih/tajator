@@ -16,7 +16,7 @@ def test_aapl_frozen_candidate_is_the_source_default():
     assert aapl.entry_confirmation == "touch_rejection"
     assert aapl.max_entry_to_stop_cents == 100
     assert aapl.no_new_entries_after.hour == 14
-    assert aapl.blocked_direction_regimes == ["put:trend_up"]
+    assert aapl.blocked_direction_regimes == ["put:trend_up", "call:trend_down"]
 
     # The candidate is symbol-specific; unrelated symbols retain global rules.
     assert settings.for_symbol("MSFT") is settings

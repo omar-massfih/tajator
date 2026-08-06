@@ -75,7 +75,7 @@ def _default_symbol_strategy_overrides() -> dict[str, SymbolStrategyOverride]:
             entry_confirmation="touch_rejection",
             max_entry_to_stop_cents=100,
             no_new_entries_after=time(14, 0),
-            blocked_direction_regimes=["put:trend_up"],
+            blocked_direction_regimes=["put:trend_up", "call:trend_down"],
         )
     }
 
@@ -166,9 +166,10 @@ class Settings(BaseSettings):
     blocked_direction_regimes: list[str] = Field(default_factory=list)
     min_level_quality_score: float | None = None
     # Frozen research candidate: AAPL waits for rejection confirmation, caps
-    # entry-to-stop distance at $1, stops entering at 14:00 ET, and avoids puts
-    # in an up-trend regime. An explicit SYMBOL_STRATEGY_OVERRIDES value still
-    # replaces this mapping, so deployments can deliberately choose otherwise.
+    # entry-to-stop distance at $1, stops entering at 14:00 ET, and avoids
+    # trading against the regime trend (puts in an up-trend, calls in a
+    # down-trend). An explicit SYMBOL_STRATEGY_OVERRIDES value still replaces
+    # this mapping, so deployments can deliberately choose otherwise.
     symbol_strategy_overrides: dict[str, SymbolStrategyOverride] = Field(
         default_factory=_default_symbol_strategy_overrides
     )
